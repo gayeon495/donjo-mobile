@@ -3,6 +3,8 @@
   "version": "2.0.0",
   "private": true,
   "scripts": {
-    "start": "npx serve ."
+    "start": "npx serve .",
+    "test": "node --test test/*.test.js",
+    "build": "node scripts/build-check.js"
   }
 }
