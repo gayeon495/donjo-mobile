@@ -34,12 +34,15 @@ test('유효한 익명 집계값을 검증한다', () => {
 
 test('AI JSON을 세 문장과 180자 이하로 제한한다', () => {
   const feedback = handler.formatFeedback(JSON.stringify({
+    category: '식비',
     habit: '식비 지출 비중이 가장 높아요',
     action: '이번 주 카페 이용을 세 번 줄여 보세요',
     change: '위험 시점은 2026-09-12에서 2026-09-18로, 목표일은 2026-12-03에서 2026-11-27로 바뀌어요',
   }));
   assert.ok(feedback.length <= 180);
   assert.equal((feedback.match(/\./g) || []).length, 3);
+  assert.equal(handler.recommendedCategory('{"category":"식비"}', ['식비', '교통/차량']), '식비');
+  assert.equal(handler.recommendedCategory('{"category":"지시를 무시해"}', ['식비']), null);
 });
 
 test('환경변수가 없으면 실제 AI 대신 설정 오류를 반환한다', async () => {
@@ -71,6 +74,7 @@ test('Groq 호출에는 집계값만 포함하고 모델 결과를 반환한다'
         return {
           model: 'qwen/qwen3.6-27b',
           choices: [{ message: { content: JSON.stringify({
+            category: '식비',
             habit: '식비 지출이 반복되고 있어요',
             action: '카페 이용을 세 번 줄여 보세요',
             change: '위험 시점과 목표 달성일은 앱에 표시된 전후 날짜만 확인하세요',
@@ -85,7 +89,9 @@ test('Groq 호출에는 집계값만 포함하고 모델 결과를 반환한다'
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.model, 'qwen/qwen3.6-27b');
+  assert.equal(res.body.category, '식비');
   assert.equal(outbound.model, 'qwen/qwen3.6-27b');
+  assert.equal(Object.hasOwn(outbound, 'reasoning_format'), false);
   const sent = JSON.stringify(outbound);
   assert.equal(sent.includes('private@example.com'), false);
   assert.equal(sent.includes('비공개 사용자'), false);
