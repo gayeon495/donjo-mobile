@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "돈__조",
+    "slug": "donjo-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": { "backgroundColor": "#F6F9FF" },
+    "android": { "package": "com.donjo.mobile" },
+    "ios": {
+      "bundleIdentifier": "com.donjo.mobile",
+      "buildNumber": "1",
+      "supportsTablet": false
+    }
+  }
+}

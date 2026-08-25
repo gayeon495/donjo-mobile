@@ -1,0 +1,6 @@
+node_modules/
+.expo/
+.expo-check/
+.expo-ios-check/
+dist/
+*.log
