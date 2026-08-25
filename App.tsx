@@ -1,13 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Linking from 'expo-linking';
-import * as WebBrowser from 'expo-web-browser';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Animated,
   Pressable,
-  Platform,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -16,7 +13,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import type { Provider, Session } from '@supabase/supabase-js';
+import type { Session } from '@supabase/supabase-js';
 import {
   loadRemoteProfile,
   saveRemoteProfile,
@@ -30,12 +27,11 @@ import {
 } from './lib/finance-sync';
 import { supabase } from './lib/supabase';
 
-WebBrowser.maybeCompleteAuthSession();
-
 type Tab = 'past' | 'future' | 'whatif' | 'my';
 type MyView = 'home' | 'risk' | 'goals' | 'notifications' | 'data';
 
 const LEGACY_STORE_KEY = '@donjo-profile-v1';
+const DEMO_MODE_KEY = '@donjo-demo-mode-v1';
 const categories: Category[] = ['식비', '카페·배달', '쇼핑', '교통', '기타'];
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const newId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (token) => {
@@ -120,6 +116,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [authReady, setAuthReady] = useState(!supabase);
   const [session, setSession] = useState<Session | null>(null);
+  const [isDemo, setIsDemo] = useState(false);
   const [cloudReady, setCloudReady] = useState(false);
   const [syncState, setSyncState] = useState('');
   const [tab, setTab] = useState<Tab>('past');
@@ -137,15 +134,22 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    AsyncStorage.getItem(LEGACY_STORE_KEY).then((saved) => {
-      if (!active) return;
-      if (saved) {
-        const restored = normalizeProfile(JSON.parse(saved));
-        profileRef.current = restored;
-        setProfile(restored);
-      }
-      setTimeout(() => setReady(true), 2600);
-    });
+    Promise.all([
+      AsyncStorage.getItem(LEGACY_STORE_KEY),
+      AsyncStorage.getItem(DEMO_MODE_KEY),
+    ])
+      .then(([saved, demoMode]) => {
+        if (!active) return;
+        if (saved) {
+          const restored = normalizeProfile(JSON.parse(saved));
+          profileRef.current = restored;
+          setProfile(restored);
+        }
+        setIsDemo(demoMode === 'true');
+      })
+      .finally(() => {
+        if (active) setTimeout(() => setReady(true), 2600);
+      });
     return () => { active = false; };
   }, []);
 
@@ -156,6 +160,10 @@ export default function App() {
       .then(({ data }) => {
         if (!active) return;
         setSession(data.session);
+        if (data.session) {
+          setIsDemo(false);
+          AsyncStorage.removeItem(DEMO_MODE_KEY);
+        }
         setAuthReady(true);
       })
       .catch(() => {
@@ -164,20 +172,13 @@ export default function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       if (!active) return;
       setSession(nextSession);
+      if (nextSession) {
+        setIsDemo(false);
+        AsyncStorage.removeItem(DEMO_MODE_KEY);
+      }
       setAuthReady(true);
     });
     return () => { active = false; subscription.unsubscribe(); };
-  }, []);
-
-  useEffect(() => {
-    if (!supabase || Platform.OS !== 'web' || typeof window === 'undefined') return;
-    const url = new URL(window.location.href);
-    const code = url.searchParams.get('code');
-    if (!code) return;
-    supabase.auth.exchangeCodeForSession(code).then(({ error }) => {
-      if (error) setSyncState(`로그인 확인에 실패했어요: ${error.message}`);
-      window.history.replaceState({}, '', `${url.origin}${url.pathname}`);
-    });
   }, []);
 
   useEffect(() => {
@@ -236,6 +237,14 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [profile, cloudReady, session?.user.id, cutAmount]);
 
+  useEffect(() => {
+    if (!ready || !isDemo) return;
+    const timer = setTimeout(() => {
+      AsyncStorage.setItem(LEGACY_STORE_KEY, JSON.stringify(profile));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [profile, ready, isDemo]);
+
   const forecast = useMemo(() => calculate(profile, 90), [profile]);
   const status = useMemo(() => statusFor(profile, forecast), [profile, forecast]);
   const categoryTotals = useMemo(() => categories.map((category) => ({
@@ -269,15 +278,29 @@ export default function App() {
     setNewAmount('');
   };
 
+  const enterDemo = async () => {
+    setIsDemo(true);
+    setCloudReady(true);
+    setSyncState('체험 데이터는 이 기기에만 저장돼요.');
+    await AsyncStorage.setItem(DEMO_MODE_KEY, 'true');
+  };
+
   const signOut = async () => {
+    if (isDemo) {
+      await AsyncStorage.removeItem(DEMO_MODE_KEY);
+      setIsDemo(false);
+      setCloudReady(false);
+      setSyncState('');
+      return;
+    }
     if (!supabase) return;
     const { error } = await supabase.auth.signOut();
     if (error) Alert.alert('로그아웃에 실패했어요.', error.message);
   };
 
   if (!ready || !authReady) return <Splash />;
-  if (!session) return <Login />;
-  if (!cloudReady) return <SyncScreen message={syncState} />;
+  if (!session && !isDemo) return <Login onTryDemo={enterDemo} />;
+  if (!cloudReady && !isDemo) return <SyncScreen message={syncState} />;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -286,11 +309,11 @@ export default function App() {
         {tab === 'past' && <Past profile={profile} setProfile={setProfile} newTitle={newTitle} setNewTitle={setNewTitle} newAmount={newAmount} setNewAmount={setNewAmount} category={newCategory} setCategory={setNewCategory} addExpense={addExpense} repeat={repeat} totals={categoryTotals} maxTotal={maxCategory} />}
         {tab === 'future' && <Future profile={profile} forecast={forecast} status={status} onWhatIf={() => setTab('whatif')} />}
         {tab === 'whatif' && <WhatIf cutAmount={cutAmount} setCutAmount={setCutAmount} forecast={forecast} afterForecast={afterForecast} status={status} afterStatus={afterStatus} />}
-        {tab === 'my' && myView === 'home' && <My profile={profile} email={session.user.email ?? '사용자'} onOpen={setMyView} onSignOut={signOut} />}
+        {tab === 'my' && myView === 'home' && <My profile={profile} email={session?.user.email ?? '체험 사용자'} isDemo={isDemo} onOpen={setMyView} onSignOut={signOut} />}
         {tab === 'my' && myView === 'risk' && <RiskSettings profile={profile} setProfile={setProfile} onBack={() => setMyView('home')} />}
         {tab === 'my' && myView === 'goals' && <GoalSettings profile={profile} setProfile={setProfile} onBack={() => setMyView('home')} />}
         {tab === 'my' && myView === 'notifications' && <NotificationSettings profile={profile} setProfile={setProfile} onBack={() => setMyView('home')} />}
-        {tab === 'my' && myView === 'data' && <DataSettings profile={profile} setProfile={setProfile} onBack={() => setMyView('home')} syncState={syncState} />}
+        {tab === 'my' && myView === 'data' && <DataSettings profile={profile} setProfile={setProfile} onBack={() => setMyView('home')} syncState={syncState} isDemo={isDemo} />}
       </View>
       <Nav tab={tab} setTab={(nextTab) => { setTab(nextTab); if (nextTab === 'my') setMyView('home'); }} />
     </SafeAreaView>
@@ -314,34 +337,7 @@ function Splash() {
   return <SafeAreaView style={styles.safe}><View style={styles.splash}><View style={styles.reelStage}><Text style={styles.reelFixed}>돈</Text><View style={styles.reelPill}><Animated.View style={[styles.reelTrack, { transform: [{ translateY: offset }] }]}>{[...words, ...words].map((word, index) => <Text key={`${word}-${index}`} style={styles.reelWord}>{word}</Text>)}</Animated.View><View pointerEvents="none" style={styles.reelFadeTop} /><View pointerEvents="none" style={styles.reelFadeBottom} /></View><Text style={styles.reelFixed}>조</Text></View><Text style={styles.splashCopy}>나의 돈을 지켜조</Text><View style={styles.dots}>{[0, 1, 2].map((index) => <View key={index} style={[styles.dot, step === index && styles.dotActive]} />)}</View></View></SafeAreaView>;
 }
 
-type OAuthProvider = Provider | 'custom:naver';
-
-async function completeOAuthUrl(url: string) {
-  if (!supabase) return;
-  const parsed = Linking.parse(url);
-  const code = typeof parsed.queryParams?.code === 'string' ? parsed.queryParams.code : undefined;
-  if (!code) throw new Error('로그인 인증 코드를 받지 못했어요.');
-  const { error } = await supabase.auth.exchangeCodeForSession(code);
-  if (error) throw error;
-}
-
-async function startOAuth(provider: OAuthProvider) {
-  if (!supabase) throw new Error('Supabase 환경변수가 설정되지 않았습니다.');
-  const redirectTo = Platform.OS === 'web' && typeof window !== 'undefined'
-    ? `${window.location.origin}/`
-    : Linking.createURL('auth/callback');
-  const { data, error } = await supabase.auth.signInWithOAuth({
-    provider: provider as Provider,
-    options: { redirectTo, skipBrowserRedirect: Platform.OS !== 'web' },
-  });
-  if (error) throw error;
-  if (Platform.OS === 'web' || !data.url) return;
-  const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
-  if (result.type === 'success') await completeOAuthUrl(result.url);
-  if (result.type === 'cancel' || result.type === 'dismiss') throw new Error('로그인이 취소됐어요.');
-}
-
-function Login() {
+function Login({ onTryDemo }: { onTryDemo: () => void }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
@@ -367,18 +363,7 @@ function Login() {
     }
   };
 
-  const socialLogin = async (provider: OAuthProvider) => {
-    setBusy(true);
-    try {
-      await startOAuth(provider);
-    } catch (error: any) {
-      Alert.alert('소셜 로그인에 실패했어요.', error.message ?? 'OAuth 설정을 확인해 주세요.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.login}><Text style={styles.back}>‹</Text><Text style={styles.loginTitle}>{isSignUp ? '돈의 미래를,\n시작해 볼까요?' : '돈의 미래,\n함께 볼까요?'}</Text><Label text="이메일"><TextInput value={email} onChangeText={setEmail} placeholder="이메일" keyboardType="email-address" autoCapitalize="none" autoComplete="email" style={styles.input} /></Label><Label text="비밀번호"><TextInput value={password} onChangeText={setPassword} placeholder="6자 이상 비밀번호" secureTextEntry autoComplete={isSignUp ? 'new-password' : 'current-password'} style={styles.input} /></Label><Primary text={busy ? '처리 중...' : isSignUp ? '회원가입' : '로그인'} onPress={busy ? undefined : submit} /><Text style={styles.or}>또는</Text><Secondary text="Google로 계속하기" onPress={busy ? undefined : () => socialLogin('google')} /><Secondary text="Naver로 계속하기" onPress={busy ? undefined : () => socialLogin('custom:naver')} /><Pressable disabled={busy} onPress={() => setIsSignUp((value) => !value)}><Text style={styles.signUp}>{isSignUp ? '이미 계정이 있나요? ' : '계정이 없나요? '}<Text style={styles.link}>{isSignUp ? '로그인' : '회원가입'}</Text></Text></Pressable><Text style={styles.authHint}>로그인하면 입력한 돈 정보가 Supabase에 안전하게 동기화돼요.</Text></ScrollView></SafeAreaView>;
+  return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.login}><Text style={styles.back}>‹</Text><Text style={styles.loginTitle}>{isSignUp ? '돈의 미래를,\n시작해 볼까요?' : '돈의 미래,\n함께 볼까요?'}</Text><Primary text="체험 로그인" onPress={busy ? undefined : onTryDemo} /><Text style={styles.authHint}>계정 없이 바로 시작하고, 입력한 정보는 이 기기에만 저장돼요.</Text><Text style={styles.or}>또는 이메일 계정으로 계속</Text><Label text="이메일"><TextInput value={email} onChangeText={setEmail} placeholder="이메일" keyboardType="email-address" autoCapitalize="none" autoComplete="email" style={styles.input} /></Label><Label text="비밀번호"><TextInput value={password} onChangeText={setPassword} placeholder="6자 이상 비밀번호" secureTextEntry autoComplete={isSignUp ? 'new-password' : 'current-password'} style={styles.input} /></Label><Secondary text={busy ? '처리 중...' : isSignUp ? '이메일로 회원가입' : '이메일로 로그인'} onPress={busy ? undefined : submit} /><Pressable disabled={busy} onPress={() => setIsSignUp((value) => !value)}><Text style={styles.signUp}>{isSignUp ? '이미 계정이 있나요? ' : '계정이 없나요? '}<Text style={styles.link}>{isSignUp ? '로그인' : '회원가입'}</Text></Text></Pressable><Text style={styles.authHint}>이메일 회원가입을 완료하면 Supabase에 안전하게 동기화돼요.</Text></ScrollView></SafeAreaView>;
 }
 
 function SyncScreen({ message }: { message: string }) {
@@ -405,10 +390,11 @@ function WhatIf({ cutAmount, setCutAmount, forecast, afterForecast, status, afte
   return <ScrollView contentContainerStyle={styles.scroll}><Header title="만약에" /><Card><Text style={styles.cardTitle}>☕ 카페·배달</Text><Label text="월 소비 감소액"><TextInput value={cutAmount} onChangeText={setCutAmount} keyboardType="number-pad" style={styles.input} /></Label><Text style={styles.description}>감소분을 교환학생 목표에 반영합니다.</Text></Card><Card><View style={styles.compare}><View><Text style={styles.description}>기존</Text><Text style={styles.compareValue}>{before}</Text></View><Text style={styles.arrow}>→</Text><View><Text style={styles.description}>변경 후</Text><Text style={[styles.compareValue, styles.mint]}>{after}</Text></View></View><View style={styles.divider} /><Text style={styles.description}>30일 후 잔액: {won(forecast[29] ?? 0)} → {won(afterForecast[29] ?? 0)}</Text></Card><Card style={styles.goodCard}><Text style={styles.goodText}>이렇게 줄이면 위험 시점이 늦춰지고, 목표 달성일도 빨라져요.</Text></Card></ScrollView>;
 }
 
-function My({ profile, email, onOpen, onSignOut }: { profile: Profile; email: string; onOpen: (view: MyView) => void; onSignOut: () => void }) {
+function My({ profile, email, isDemo, onOpen, onSignOut }: { profile: Profile; email: string; isDemo: boolean; onOpen: (view: MyView) => void; onSignOut: () => void }) {
   const score = Math.min(1000, Math.max(0, Math.round((profile.balance - profile.danger) / Math.max(profile.warning, 1) * 350)));
   const nextLevel = Math.max(0, 1000 - score);
-  return <ScrollView contentContainerStyle={styles.scroll}><Header title="마이" /><View style={styles.profileRow}><View style={styles.avatar}><Text style={styles.avatarText}>●</Text></View><View><Text style={styles.name}>{email.split('@')[0]}님</Text><Text style={styles.description}>{email}</Text></View></View><Card style={styles.balanceCard}><Text style={styles.description}>이번 달 안전 여유</Text><Text style={styles.balanceValue}>{won(Math.max(0, profile.balance - profile.warning))}</Text><Text style={styles.mint}>✦ Supabase에 동기화된 내 정보예요</Text></Card><Card><Text style={styles.cardTitle}>절약 점수 <Text style={styles.mint}>{score}점</Text></Text><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${Math.min(score / 10, 100)}%` }]} /></View><Text style={styles.description}>다음 레벨까지 {nextLevel}점 · 목표와 지출을 기록할수록 점수가 갱신돼요.</Text></Card><Card><ListRow icon="◈" text="내 위험 기준" action="설정" onPress={() => onOpen('risk')} /><ListRow icon="◎" text="목표 관리" action="추가" onPress={() => onOpen('goals')} /><ListRow icon="♧" text="알림 설정" action="설정" onPress={() => onOpen('notifications')} /><ListRow icon="▣" text="데이터 관리" action="관리" onPress={() => onOpen('data')} /></Card><Pressable onPress={onSignOut}><Text style={styles.logout}>로그아웃</Text></Pressable></ScrollView>;
+  const displayName = isDemo ? '체험 사용자' : email.split('@')[0];
+  return <ScrollView contentContainerStyle={styles.scroll}><Header title="마이" /><View style={styles.profileRow}><View style={styles.avatar}><Text style={styles.avatarText}>●</Text></View><View><Text style={styles.name}>{displayName}님</Text><Text style={styles.description}>{isDemo ? '계정 없이 체험 중' : email}</Text></View></View><Card style={styles.balanceCard}><Text style={styles.description}>이번 달 안전 여유</Text><Text style={styles.balanceValue}>{won(Math.max(0, profile.balance - profile.warning))}</Text><Text style={styles.mint}>{isDemo ? '✦ 체험 데이터는 이 기기에만 저장돼요' : '✦ Supabase에 동기화된 내 정보예요'}</Text></Card><Card><Text style={styles.cardTitle}>절약 점수 <Text style={styles.mint}>{score}점</Text></Text><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${Math.min(score / 10, 100)}%` }]} /></View><Text style={styles.description}>다음 레벨까지 {nextLevel}점 · 목표와 지출을 기록할수록 점수가 갱신돼요.</Text></Card><Card><ListRow icon="◈" text="내 위험 기준" action="설정" onPress={() => onOpen('risk')} /><ListRow icon="◎" text="목표 관리" action="추가" onPress={() => onOpen('goals')} /><ListRow icon="♧" text="알림 설정" action="설정" onPress={() => onOpen('notifications')} /><ListRow icon="▣" text="데이터 관리" action="관리" onPress={() => onOpen('data')} /></Card><Pressable onPress={onSignOut}><Text style={styles.logout}>{isDemo ? '체험 종료' : '로그아웃'}</Text></Pressable></ScrollView>;
 }
 
 function RiskSettings({ profile, setProfile, onBack }: { profile: Profile; setProfile: (profile: Profile) => void; onBack: () => void }) {
@@ -434,9 +420,9 @@ function NotificationSettings({ profile, setProfile, onBack }: { profile: Profil
   return <ScrollView contentContainerStyle={styles.scroll}><Header title="알림 설정" action="마이로" onAction={onBack} /><Card><View style={styles.switchRow}><View><Text style={styles.listText}>위험 기준 알림</Text><Text style={styles.description}>잔액이 경고·위험 기준에 가까워지면 알려드려요.</Text></View><Switch value={profile.notifications.risk} onValueChange={(value) => setNotification('risk', value)} trackColor={{ false: '#DCE8FA', true: '#9DC0FF' }} thumbColor={profile.notifications.risk ? '#2563EB' : '#FFFFFF'} /></View><View style={styles.switchRow}><View><Text style={styles.listText}>목표 진행 알림</Text><Text style={styles.description}>목표 달성에 가까워졌을 때 알려드려요.</Text></View><Switch value={profile.notifications.goal} onValueChange={(value) => setNotification('goal', value)} trackColor={{ false: '#DCE8FA', true: '#9DC0FF' }} thumbColor={profile.notifications.goal ? '#2563EB' : '#FFFFFF'} /></View></Card><Primary text="알림 설정 저장" onPress={() => { Alert.alert('저장했어요', '알림 설정을 기기에 저장했습니다.'); onBack(); }} /></ScrollView>;
 }
 
-function DataSettings({ profile, setProfile, onBack, syncState }: { profile: Profile; setProfile: (profile: Profile) => void; onBack: () => void; syncState: string }) {
+function DataSettings({ profile, setProfile, onBack, syncState, isDemo }: { profile: Profile; setProfile: (profile: Profile) => void; onBack: () => void; syncState: string; isDemo: boolean }) {
   const clear = () => Alert.alert('입력 데이터 전체 삭제', '지출, 예정 수입·고정지출, 목표가 삭제됩니다.', [{ text: '취소', style: 'cancel' }, { text: '삭제', style: 'destructive', onPress: () => setProfile({ ...profile, expenses: [], cashFlows: [], goals: [] }) }]);
-  return <ScrollView contentContainerStyle={styles.scroll}><Header title="데이터 관리" action="마이로" onAction={onBack} /><Card><Text style={styles.cardTitle}>저장된 데이터</Text><Text style={styles.description}>최근 지출 {profile.expenses.length}건 · 예정 수입·고정지출 {profile.cashFlows.length}건 · 목표 {profile.goals.length}개</Text><Text style={styles.description}>이 기기와 Supabase에 동기화됩니다.</Text><Text style={styles.mint}>{syncState}</Text></Card><Secondary text="샘플 데이터로 초기화" onPress={() => setProfile(sampleProfile())} /><Pressable style={styles.dangerButton} onPress={clear}><Text style={styles.dangerButtonText}>입력 데이터 전체 삭제</Text></Pressable></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scroll}><Header title="데이터 관리" action="마이로" onAction={onBack} /><Card><Text style={styles.cardTitle}>저장된 데이터</Text><Text style={styles.description}>최근 지출 {profile.expenses.length}건 · 예정 수입·고정지출 {profile.cashFlows.length}건 · 목표 {profile.goals.length}개</Text><Text style={styles.description}>{isDemo ? '체험 데이터는 이 기기에만 저장됩니다.' : '이 기기와 Supabase에 동기화됩니다.'}</Text><Text style={styles.mint}>{syncState}</Text></Card><Secondary text="샘플 데이터로 초기화" onPress={() => setProfile(sampleProfile())} /><Pressable style={styles.dangerButton} onPress={clear}><Text style={styles.dangerButtonText}>입력 데이터 전체 삭제</Text></Pressable></ScrollView>;
 }
 
 function Header({ title, action, onAction }: { title: string; action?: string; onAction?: () => void }) { return <View style={styles.header}><View><Text style={styles.brand}>돈__조</Text><Text style={styles.title}>{title}</Text></View>{action && <Pressable style={styles.headerAction} onPress={onAction}><Text style={styles.headerActionText}>{action}</Text></Pressable>}</View>; }
