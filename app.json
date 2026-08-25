@@ -6,12 +6,20 @@
     "scheme": "donjo",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "splash": { "backgroundColor": "#F6F9FF" },
-    "android": { "package": "com.donjo.mobile" },
+    "splash": {
+      "backgroundColor": "#F6F9FF"
+    },
+    "android": {
+      "package": "com.donjo.mobile"
+    },
     "ios": {
       "bundleIdentifier": "com.donjo.mobile",
       "buildNumber": "1",
       "supportsTablet": false
-    }
+    },
+    "plugins": [
+      "expo-web-browser",
+      "expo-secure-store"
+    ]
   }
 }
