@@ -32,6 +32,7 @@ type MyView = 'home' | 'risk' | 'goals' | 'notifications' | 'data';
 
 const LEGACY_STORE_KEY = '@donjo-profile-v1';
 const DEMO_MODE_KEY = '@donjo-demo-mode-v1';
+const ONBOARDING_STORE_PREFIX = '@donjo-onboarding-v1';
 const categories: Category[] = ['식비', '카페·배달', '쇼핑', '교통', '기타'];
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const newId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (token) => {
@@ -40,6 +41,7 @@ const newId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (tok
 });
 const validId = (id: string) => uuidPattern.test(id) ? id : newId();
 const userStoreKey = (userId: string) => `@donjo-profile-v2:${userId}`;
+const onboardingStoreKey = (userId?: string) => `${ONBOARDING_STORE_PREFIX}:${userId ?? 'demo'}`;
 const won = (value: number) => `${Math.round(value).toLocaleString('ko-KR')}원`;
 const dateOffset = (days: number) => {
   const d = new Date();
@@ -88,8 +90,57 @@ function numberFrom(text: string) {
   return Number(text.replace(/[^0-9]/g, '')) || 0;
 }
 
+function dateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function daysFromToday(value: string) {
+  const target = new Date(`${value}T00:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((target.getTime() - today.getTime()) / 86400000);
+}
+
+function recentExpenses(profile: Profile, days = 30) {
+  return profile.expenses.filter((item) => {
+    const age = -daysFromToday(item.date);
+    return age >= 0 && age < days;
+  });
+}
+
+function spendingInsight(profile: Profile) {
+  const recent = recentExpenses(profile);
+  const total = recent.reduce((sum, item) => sum + item.amount, 0);
+  const byCategory = categories.map((category) => ({
+    category,
+    total: recent.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0),
+  })).sort((a, b) => b.total - a.total);
+  const repeatMap = new Map<string, { count: number; amount: number }>();
+  recent.forEach((item) => {
+    const previous = repeatMap.get(item.title) ?? { count: 0, amount: 0 };
+    repeatMap.set(item.title, { count: previous.count + 1, amount: previous.amount + item.amount });
+  });
+  const repeated = [...repeatMap.entries()].sort((a, b) => b[1].amount - a[1].amount)[0];
+  const top = byCategory[0] ?? { category: '기타' as Category, total: 0 };
+  const share = total > 0 ? Math.round(top.total / total * 100) : 0;
+  const suggestedAmount = Math.max(1000, Math.round(top.total * 0.1 / 1000) * 1000);
+  return {
+    total,
+    topCategory: top.category,
+    share,
+    repeated,
+    suggestedAmount,
+    feedback: total > 0
+      ? `최근 30일 지출 중 ${top.category}가 ${share}%로 가장 커요. ${won(suggestedAmount)}만 줄여도 미래 잔액에 여유가 생겨요.`
+      : '소비 내역을 추가하면 가장 큰 지출과 반복 소비를 분석해 드려요.',
+  };
+}
+
 function calculate(profile: Profile, days: number, monthlyCut = 0) {
-  const variableDaily = profile.expenses.reduce((sum, item) => sum + item.amount, 0) / 30;
+  const variableDaily = recentExpenses(profile).reduce((sum, item) => sum + item.amount, 0) / 30;
   const dailyCut = monthlyCut / 30;
   let balance = profile.balance;
   const daily: number[] = [];
@@ -117,6 +168,8 @@ export default function App() {
   const [authReady, setAuthReady] = useState(!supabase);
   const [session, setSession] = useState<Session | null>(null);
   const [isDemo, setIsDemo] = useState(false);
+  const [onboardingReady, setOnboardingReady] = useState(false);
+  const [onboardingComplete, setOnboardingComplete] = useState(false);
   const [cloudReady, setCloudReady] = useState(false);
   const [syncState, setSyncState] = useState('');
   const [tab, setTab] = useState<Tab>('past');
@@ -245,6 +298,22 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [profile, ready, isDemo]);
 
+  useEffect(() => {
+    if (!ready || (!isDemo && !session?.user)) return;
+    let active = true;
+    setOnboardingReady(false);
+    AsyncStorage.getItem(onboardingStoreKey(session?.user.id)).then((value) => {
+      if (!active) return;
+      setOnboardingComplete(value === 'true');
+      setOnboardingReady(true);
+    }).catch(() => {
+      if (!active) return;
+      setOnboardingComplete(false);
+      setOnboardingReady(true);
+    });
+    return () => { active = false; };
+  }, [ready, isDemo, session?.user.id]);
+
   const forecast = useMemo(() => calculate(profile, 90), [profile]);
   const status = useMemo(() => statusFor(profile, forecast), [profile, forecast]);
   const categoryTotals = useMemo(() => categories.map((category) => ({
@@ -260,6 +329,7 @@ export default function App() {
     });
     return [...map.entries()].sort((a, b) => b[1].amount - a[1].amount)[0];
   }, [profile.expenses]);
+  const insight = useMemo(() => spendingInsight(profile), [profile.expenses]);
   const cut = numberFrom(cutAmount);
   const afterForecast = useMemo(() => calculate(profile, 90, cut), [profile, cut]);
   const afterStatus = useMemo(() => statusFor(profile, afterForecast), [profile, afterForecast]);
@@ -285,6 +355,12 @@ export default function App() {
     await AsyncStorage.setItem(DEMO_MODE_KEY, 'true');
   };
 
+  const completeOnboarding = async (nextProfile: Profile) => {
+    setProfile(nextProfile);
+    await AsyncStorage.setItem(onboardingStoreKey(session?.user.id), 'true');
+    setOnboardingComplete(true);
+  };
+
   const signOut = async () => {
     if (isDemo) {
       await AsyncStorage.removeItem(DEMO_MODE_KEY);
@@ -301,14 +377,16 @@ export default function App() {
   if (!ready || !authReady) return <Splash />;
   if (!session && !isDemo) return <Login onTryDemo={enterDemo} />;
   if (!cloudReady && !isDemo) return <SyncScreen message={syncState} />;
+  if (!onboardingReady) return <SyncScreen message="최초 설정을 확인하는 중이에요." />;
+  if (!onboardingComplete) return <Onboarding profile={profile} onComplete={completeOnboarding} />;
 
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
       <View style={styles.app}>
-        {tab === 'past' && <Past profile={profile} setProfile={setProfile} newTitle={newTitle} setNewTitle={setNewTitle} newAmount={newAmount} setNewAmount={setNewAmount} category={newCategory} setCategory={setNewCategory} addExpense={addExpense} repeat={repeat} totals={categoryTotals} maxTotal={maxCategory} />}
-        {tab === 'future' && <Future profile={profile} forecast={forecast} status={status} onWhatIf={() => setTab('whatif')} />}
-        {tab === 'whatif' && <WhatIf cutAmount={cutAmount} setCutAmount={setCutAmount} forecast={forecast} afterForecast={afterForecast} status={status} afterStatus={afterStatus} />}
+        {tab === 'past' && <Past profile={profile} setProfile={setProfile} newTitle={newTitle} setNewTitle={setNewTitle} newAmount={newAmount} setNewAmount={setNewAmount} category={newCategory} setCategory={setNewCategory} addExpense={addExpense} repeat={repeat} totals={categoryTotals} maxTotal={maxCategory} insight={insight} />}
+        {tab === 'future' && <Future profile={profile} forecast={forecast} status={status} insight={insight} onWhatIf={() => setTab('whatif')} />}
+        {tab === 'whatif' && <WhatIf profile={profile} cutAmount={cutAmount} setCutAmount={setCutAmount} forecast={forecast} afterForecast={afterForecast} status={status} afterStatus={afterStatus} />}
         {tab === 'my' && myView === 'home' && <My profile={profile} email={session?.user.email ?? '체험 사용자'} isDemo={isDemo} onOpen={setMyView} onSignOut={signOut} />}
         {tab === 'my' && myView === 'risk' && <RiskSettings profile={profile} setProfile={setProfile} onBack={() => setMyView('home')} />}
         {tab === 'my' && myView === 'goals' && <GoalSettings profile={profile} setProfile={setProfile} onBack={() => setMyView('home')} />}
@@ -335,6 +413,33 @@ function Splash() {
     return () => clearInterval(timer);
   }, []);
   return <SafeAreaView style={styles.safe}><View style={styles.splash}><View style={styles.reelStage}><Text style={styles.reelFixed}>돈</Text><View style={styles.reelPill}><Animated.View style={[styles.reelTrack, { transform: [{ translateY: offset }] }]}>{[...words, ...words].map((word, index) => <Text key={`${word}-${index}`} style={styles.reelWord}>{word}</Text>)}</Animated.View><View pointerEvents="none" style={styles.reelFadeTop} /><View pointerEvents="none" style={styles.reelFadeBottom} /></View><Text style={styles.reelFixed}>조</Text></View><Text style={styles.splashCopy}>나의 돈을 지켜조</Text><View style={styles.dots}>{[0, 1, 2].map((index) => <View key={index} style={[styles.dot, step === index && styles.dotActive]} />)}</View></View></SafeAreaView>;
+}
+
+function Onboarding({ profile, onComplete }: { profile: Profile; onComplete: (profile: Profile) => void }) {
+  const primaryGoal = profile.goals[0];
+  const [balance, setBalance] = useState(String(profile.balance));
+  const [warning, setWarning] = useState(String(profile.warning));
+  const [danger, setDanger] = useState(String(profile.danger));
+  const [goalTitle, setGoalTitle] = useState(primaryGoal?.title ?? '');
+  const [goalTarget, setGoalTarget] = useState(String(primaryGoal?.targetAmount ?? ''));
+  const [goalSaved, setGoalSaved] = useState(String(primaryGoal?.savedAmount ?? 0));
+  const [goalDate, setGoalDate] = useState(primaryGoal?.targetDate ?? dateOffset(180));
+
+  const save = () => {
+    const nextBalance = numberFrom(balance);
+    const nextWarning = numberFrom(warning);
+    const nextDanger = numberFrom(danger);
+    const targetAmount = numberFrom(goalTarget);
+    const savedAmount = numberFrom(goalSaved);
+    if (nextWarning <= nextDanger) return Alert.alert('경고 잔액은 위험 잔액보다 크게 설정해 주세요.');
+    if (!goalTitle.trim() || targetAmount <= 0) return Alert.alert('개인 목표와 목표 금액을 입력해 주세요.');
+    if (savedAmount > targetAmount) return Alert.alert('현재 모은 금액은 목표 금액보다 클 수 없어요.');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(goalDate)) return Alert.alert('목표일을 YYYY-MM-DD 형식으로 입력해 주세요.');
+    const goal: Goal = { id: primaryGoal?.id ?? newId(), title: goalTitle.trim(), targetAmount, savedAmount, targetDate: goalDate };
+    onComplete({ ...profile, balance: nextBalance, warning: nextWarning, danger: nextDanger, goals: primaryGoal ? [goal, ...profile.goals.slice(1)] : [goal] });
+  };
+
+  return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.onboarding}><Text style={styles.onboardingEyebrow}>처음 한 번만 설정해요</Text><Text style={styles.loginTitle}>내 돈의 기준을,{`\n`}먼저 알려주세요</Text><Card><Text style={styles.cardTitle}>잔액 기준</Text><Label text="현재 잔액"><TextInput value={balance} onChangeText={setBalance} keyboardType="number-pad" style={styles.input} /></Label><Label text="경고 잔액"><TextInput value={warning} onChangeText={setWarning} keyboardType="number-pad" style={styles.input} /></Label><Label text="위험 잔액"><TextInput value={danger} onChangeText={setDanger} keyboardType="number-pad" style={styles.input} /></Label></Card><Card><Text style={styles.cardTitle}>개인 목표</Text><TextInput value={goalTitle} onChangeText={setGoalTitle} placeholder="목표명" style={styles.input} /><TextInput value={goalTarget} onChangeText={setGoalTarget} placeholder="목표 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={goalSaved} onChangeText={setGoalSaved} placeholder="현재 모은 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={goalDate} onChangeText={setGoalDate} placeholder="목표일 YYYY-MM-DD" style={[styles.input, styles.formGap]} /></Card><Primary text="설정하고 시작하기" onPress={save} /></ScrollView></SafeAreaView>;
 }
 
 function Login({ onTryDemo }: { onTryDemo: () => void }) {
@@ -370,7 +475,7 @@ function SyncScreen({ message }: { message: string }) {
   return <SafeAreaView style={styles.safe}><View style={styles.syncScreen}><Text style={styles.syncTitle}>내 돈 정보를 준비하는 중</Text><Text style={styles.description}>{message || '잠시만 기다려 주세요.'}</Text></View></SafeAreaView>;
 }
 
-function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmount, category, setCategory, addExpense, repeat, totals, maxTotal }: any) {
+function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmount, category, setCategory, addExpense, repeat, totals, maxTotal, insight }: any) {
   const [cashFlowType, setCashFlowType] = useState<'income' | 'fixed' | null>(null);
   const [cashFlowTitle, setCashFlowTitle] = useState('');
   const [cashFlowAmount, setCashFlowAmount] = useState('');
@@ -444,9 +549,10 @@ function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmo
     setGoalFormOpen(false);
   };
 
-  return <ScrollView contentContainerStyle={styles.scroll}><Header title="돈 정보 입력" action="샘플 데이터" onAction={() => setProfile(sampleProfile())} />
+  return <ScrollView contentContainerStyle={styles.scroll}><Header title="돈 정보 입력" />
     <Card><Label text="현재 사용 가능 잔액"><MoneyInput value={profile.balance} onChange={(value: string) => setProfile({ ...profile, balance: numberFrom(value) })} /></Label><Label text="경고 잔액"><MoneyInput value={profile.warning} onChange={(value: string) => setProfile({ ...profile, warning: numberFrom(value) })} /></Label><Label text="위험 잔액"><MoneyInput value={profile.danger} onChange={(value: string) => setProfile({ ...profile, danger: numberFrom(value) })} /></Label></Card>
-    <Card><Text style={styles.cardTitle}>✦ 소비 패턴 분석</Text>{repeat && <Text style={styles.repeat}>{repeat[0]} {repeat[1].count}회 · {won(repeat[1].amount)}</Text>}{totals.map((item: any) => <View key={item.category} style={styles.barRow}><Text style={styles.barLabel}>{item.category}</Text><View style={styles.barTrack}><View style={[styles.barFill, { width: `${Math.max(4, item.total / maxTotal * 100)}%` }]} /></View><Text style={styles.barAmount}>{won(item.total)}</Text></View>)}<Text style={styles.analysis}>최근 지출을 기준으로 반복 소비를 분석했어요.</Text></Card>
+    <MonthlyCalendar profile={profile} />
+    <Card><Text style={styles.cardTitle}>✦ 소비 패턴 분석</Text>{repeat && <Text style={styles.repeat}>{repeat[0]} {repeat[1].count}회 · {won(repeat[1].amount)}</Text>}{totals.map((item: any) => <View key={item.category} style={styles.barRow}><Text style={styles.barLabel}>{item.category}</Text><View style={styles.barTrack}><View style={[styles.barFill, { width: `${Math.max(4, item.total / maxTotal * 100)}%` }]} /></View><Text style={styles.barAmount}>{won(item.total)}</Text></View>)}<Text style={styles.analysis}>{insight.feedback}</Text></Card>
     <Card><Text style={styles.cardTitle}>최근 지출 추가</Text><TextInput value={newTitle} onChangeText={setNewTitle} placeholder="사용처·항목" style={styles.input} /><TextInput value={newAmount} onChangeText={setNewAmount} placeholder="금액" keyboardType="number-pad" style={styles.input} /><View style={styles.categoryRow}>{categories.map((item) => <Pressable key={item} onPress={() => setCategory(item)} style={[styles.category, category === item && styles.categorySelected]}><Text style={[styles.categoryText, category === item && styles.categoryTextSelected]}>{item}</Text></Pressable>)}</View><Primary text="지출 추가" onPress={addExpense} /></Card>
     <Card>
       <ListRow icon="+" text="예정 수입" action="+ 추가" onPress={() => openCashFlowForm('income')} />
@@ -461,6 +567,31 @@ function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmo
   </ScrollView>;
 }
 
+function MonthlyCalendar({ profile }: { profile: Profile }) {
+  const now = new Date();
+  const [month, setMonth] = useState(new Date(now.getFullYear(), now.getMonth(), 1));
+  const year = month.getFullYear();
+  const monthIndex = month.getMonth();
+  const firstWeekday = new Date(year, monthIndex, 1).getDay();
+  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+  const cells = Array.from({ length: 42 }, (_, index) => {
+    const day = index - firstWeekday + 1;
+    return day > 0 && day <= daysInMonth ? day : null;
+  });
+  const moveMonth = (offset: number) => setMonth(new Date(year, monthIndex + offset, 1));
+
+  return <Card><View style={styles.calendarHeader}><Pressable onPress={() => moveMonth(-1)}><Text style={styles.calendarMove}>‹</Text></Pressable><Text style={styles.calendarTitle}>{year}년 {monthIndex + 1}월</Text><Pressable onPress={() => moveMonth(1)}><Text style={styles.calendarMove}>›</Text></Pressable></View><View style={styles.calendarGrid}>{['일', '월', '화', '수', '목', '금', '토'].map((weekday) => <View key={weekday} style={styles.calendarWeekCell}><Text style={styles.calendarWeek}>{weekday}</Text></View>)}{cells.map((day, index) => {
+    if (!day) return <View key={`empty-${index}`} style={styles.calendarCell} />;
+    const key = dateKey(new Date(year, monthIndex, day));
+    const income = profile.cashFlows.filter((item) => item.type === 'income' && item.date === key).reduce((sum, item) => sum + item.amount, 0);
+    const fixed = profile.cashFlows.filter((item) => item.type === 'fixed' && item.date === key).reduce((sum, item) => sum + item.amount, 0);
+    const expense = profile.expenses.filter((item) => item.date === key).reduce((sum, item) => sum + item.amount, 0);
+    const outflow = fixed + expense;
+    const isToday = key === dateKey(now);
+    return <View key={key} style={[styles.calendarCell, isToday && styles.calendarToday]}><Text style={[styles.calendarDay, isToday && styles.calendarDayToday]}>{day}</Text>{income > 0 && <Text style={styles.calendarIncome}>+{Math.round(income / 1000)}천</Text>}{outflow > 0 && <Text style={styles.calendarExpense}>−{Math.round(outflow / 1000)}천</Text>}</View>;
+  })}</View><View style={styles.calendarLegend}><Text style={styles.calendarIncome}>+ 수입</Text><Text style={styles.calendarExpense}>− 지출</Text></View></Card>;
+}
+
 function CashFlowRow({ item }: { item: CashFlow }) {
   const isIncome = item.type === 'income';
   return <View style={styles.cashFlowRow}><Text style={[styles.cashFlowIcon, !isIncome && styles.red]}>{isIncome ? '+' : '−'}</Text><View style={styles.cashFlowCopy}><Text style={styles.cashFlowTitle}>{item.title}</Text><Text style={styles.cashFlowDate}>{item.date}</Text></View><Text style={[styles.cashFlowAmount, !isIncome && styles.red]}>{isIncome ? '+' : '−'}{won(item.amount)}</Text></View>;
@@ -471,22 +602,38 @@ function GoalSummaryRow({ goal }: { goal: Goal }) {
   return <View style={styles.goalSummary}><View style={styles.cashFlowCopy}><Text style={styles.cashFlowTitle}>{goal.title}</Text><Text style={styles.cashFlowDate}>{won(goal.savedAmount)} / {won(goal.targetAmount)} · {goal.targetDate}</Text><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${progress}%` }]} /></View></View></View>;
 }
 
-function Future({ profile, forecast, status, onWhatIf }: any) {
+function Future({ profile, forecast, status, insight, onWhatIf }: any) {
   const day = (number: number) => forecast[number - 1] ?? 0;
-  return <ScrollView contentContainerStyle={styles.scroll}><Header title="돈의 미래" /><Card style={[styles.statusCard, { borderColor: status.color }]}><Text style={styles.statusLine}>이대로면 위험 기준까지</Text><Text style={[styles.dDay, { color: status.color }]}>{status.riskDay ? `D-${status.riskDay}` : status.label === '경고' ? '경고' : '안전'}</Text><Tag text={status.label} color={status.color} /></Card><View style={styles.metricWrap}>{[7, 14, 30].map((dayNumber) => <View key={dayNumber} style={styles.metric}><Text>{dayNumber}일 후</Text><Text style={[styles.metricValue, day(dayNumber) < 0 && styles.red]}>{won(day(dayNumber))}</Text></View>)}</View><Card><Text style={styles.cardTitle}>✦ AI 인사이트</Text><Text style={styles.repeat}>아메리카노 8번 · 40,000원</Text><Text style={styles.description}>이 지출을 줄이면 위험 시점을 늦출 수 있어요.</Text><Primary text="이만큼 줄이면?" onPress={onWhatIf} /></Card><Card><Text style={styles.cardTitle}>🎓 교환학생 <Text style={styles.mint}>62%</Text></Text><View style={styles.goalTrack}><View style={styles.goalFill} /></View><Text style={styles.description}>6,200,000원 / 10,000,000원</Text><Text style={styles.description}>목표 기간 2025.09 ~ 2026.08</Text></Card></ScrollView>;
+  const dailyAverage = recentExpenses(profile).reduce((sum, item) => sum + item.amount, 0) / 30;
+  const goal = profile.goals[0];
+  const goalProgress = goal ? Math.min(100, goal.savedAmount / Math.max(goal.targetAmount, 1) * 100) : 0;
+  return <ScrollView contentContainerStyle={styles.scroll}><Header title="돈의 미래" /><Card style={[styles.statusCard, { borderColor: status.color }]}><Text style={styles.statusLine}>이대로면 위험 기준까지</Text><Text style={[styles.dDay, { color: status.color }]}>{status.riskDay ? `D-${status.riskDay}` : status.label === '경고' ? '경고' : '안전'}</Text><Tag text={status.label} color={status.color} /></Card><View style={styles.metricWrap}>{[7, 14, 30].map((dayNumber) => <View key={dayNumber} style={styles.metric}><Text>{dayNumber}일 후</Text><Text style={[styles.metricValue, day(dayNumber) < 0 && styles.red]}>{won(day(dayNumber))}</Text></View>)}</View><Card><Text style={styles.cardTitle}>예측 계산 기준</Text><Text style={styles.formula}>현재 잔액 + 날짜별 예정 수입 − 날짜별 고정지출 − 최근 30일 하루 평균 지출</Text><Text style={styles.algorithmNumber}>하루 평균 지출 {won(dailyAverage)}</Text><Text style={styles.description}>오늘부터 하루씩 계산해 7일·14일·30일째 예상 잔액을 표시합니다. 등록되지 않은 반복 수입·지출은 포함하지 않습니다.</Text></Card><Card><Text style={styles.cardTitle}>✦ AI 인사이트 · 소비 내역 피드백</Text>{insight.repeated && <Text style={styles.repeat}>{insight.repeated[0]} {insight.repeated[1].count}회 · {won(insight.repeated[1].amount)}</Text>}<Text style={styles.description}>{insight.feedback}</Text><Text style={styles.aiBasis}>분석 기준: 최근 30일 소비 내역 · 카테고리 비중 · 반복 항목</Text><Primary text="이만큼 줄이면?" onPress={onWhatIf} /></Card>{goal && <Card><Text style={styles.cardTitle}>🎓 {goal.title} <Text style={styles.mint}>{Math.round(goalProgress)}%</Text></Text><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${goalProgress}%` }]} /></View><Text style={styles.goalBigNumber}>{won(goal.savedAmount)} / {won(goal.targetAmount)}</Text><Text style={styles.description}>목표일 {goal.targetDate}</Text></Card>}</ScrollView>;
 }
 
-function WhatIf({ cutAmount, setCutAmount, forecast, afterForecast, status, afterStatus }: any) {
+function WhatIf({ profile, cutAmount, setCutAmount, forecast, afterForecast, status, afterStatus }: any) {
   const before = status.riskDay ? `D-${status.riskDay}` : '안전';
   const after = afterStatus.riskDay ? `D-${afterStatus.riskDay}` : '안전';
-  return <ScrollView contentContainerStyle={styles.scroll}><Header title="만약에" /><Card><Text style={styles.cardTitle}>☕ 카페·배달</Text><Label text="월 소비 감소액"><TextInput value={cutAmount} onChangeText={setCutAmount} keyboardType="number-pad" style={styles.input} /></Label><Text style={styles.description}>감소분을 교환학생 목표에 반영합니다.</Text></Card><Card><View style={styles.compare}><View><Text style={styles.description}>기존</Text><Text style={styles.compareValue}>{before}</Text></View><Text style={styles.arrow}>→</Text><View><Text style={styles.description}>변경 후</Text><Text style={[styles.compareValue, styles.mint]}>{after}</Text></View></View><View style={styles.divider} /><Text style={styles.description}>30일 후 잔액: {won(forecast[29] ?? 0)} → {won(afterForecast[29] ?? 0)}</Text></Card><Card style={styles.goodCard}><Text style={styles.goodText}>이렇게 줄이면 위험 시점이 늦춰지고, 목표 달성일도 빨라져요.</Text></Card></ScrollView>;
+  const cut = numberFrom(cutAmount);
+  const goal: Goal | undefined = profile.goals[0];
+  const targetDays = goal ? Math.max(1, daysFromToday(goal.targetDate)) : 0;
+  const remaining = goal ? Math.max(0, goal.targetAmount - goal.savedAmount) : 0;
+  const baselineMonthly = remaining > 0 ? remaining / Math.max(targetDays / 30, 1) : 0;
+  const acceleratedDays = remaining > 0 ? Math.ceil(remaining / Math.max(baselineMonthly + cut, 1) * 30) : 0;
+  const projectedDate = new Date();
+  projectedDate.setDate(projectedDate.getDate() + acceleratedDays);
+  const earlierDays = goal ? Math.max(0, targetDays - acceleratedDays) : 0;
+  const riskDelay = status.riskDay ? Math.max(0, (afterStatus.riskDay || 90) - status.riskDay) : 0;
+  const riskFeedback = status.riskDay
+    ? afterStatus.riskDay ? `위험 잔액 시점이 ${riskDelay}일 늦춰져요.` : `90일 예측 기간 안의 위험 시점이 사라져요.`
+    : '현재도 90일 예측 기간 동안 위험 잔액에 도달하지 않아요.';
+  return <ScrollView contentContainerStyle={styles.scroll}><Header title="만약에" /><Card><Text style={styles.cardTitle}>☕ 소비 줄이기</Text><Label text="월 소비 감소액"><TextInput value={cutAmount} onChangeText={setCutAmount} keyboardType="number-pad" style={styles.input} /></Label><Text style={styles.description}>줄인 금액은 첫 번째 개인 목표에 매달 추가로 저축한다고 계산합니다.</Text></Card><Card><View style={styles.compare}><View><Text style={styles.description}>기존 위험 시점</Text><Text style={styles.compareValue}>{before}</Text></View><Text style={styles.arrow}>→</Text><View><Text style={styles.description}>변경 후</Text><Text style={[styles.compareValue, styles.mint]}>{after}</Text></View></View><View style={styles.divider} /><Text style={styles.resultNumber}>30일 후 {won(forecast[29] ?? 0)} → {won(afterForecast[29] ?? 0)}</Text></Card>{goal && <Card><Text style={styles.cardTitle}>{goal.title} 목표 달성일</Text><View style={styles.compare}><View><Text style={styles.description}>기존</Text><Text style={styles.goalDateNumber}>{goal.targetDate}</Text></View><Text style={styles.arrow}>→</Text><View><Text style={styles.description}>변경 후</Text><Text style={[styles.goalDateNumber, styles.mint]}>{dateKey(projectedDate)}</Text></View></View></Card>}<Card style={styles.goodCard}><Text style={styles.goodText}>{riskFeedback}{goal ? ` 목표 달성일은 ${earlierDays}일 빨라져요.` : ' 개인 목표를 추가하면 달성일 변화도 함께 계산해 드려요.'}</Text></Card></ScrollView>;
 }
 
 function My({ profile, email, isDemo, onOpen, onSignOut }: { profile: Profile; email: string; isDemo: boolean; onOpen: (view: MyView) => void; onSignOut: () => void }) {
   const score = Math.min(1000, Math.max(0, Math.round((profile.balance - profile.danger) / Math.max(profile.warning, 1) * 350)));
   const nextLevel = Math.max(0, 1000 - score);
   const displayName = isDemo ? '체험 사용자' : email.split('@')[0];
-  return <ScrollView contentContainerStyle={styles.scroll}><Header title="마이" /><View style={styles.profileRow}><View style={styles.avatar}><Text style={styles.avatarText}>●</Text></View><View><Text style={styles.name}>{displayName}님</Text><Text style={styles.description}>{isDemo ? '계정 없이 체험 중' : email}</Text></View></View><Card style={styles.balanceCard}><Text style={styles.description}>이번 달 안전 여유</Text><Text style={styles.balanceValue}>{won(Math.max(0, profile.balance - profile.warning))}</Text><Text style={styles.mint}>{isDemo ? '✦ 체험 데이터는 이 기기에만 저장돼요' : '✦ Supabase에 동기화된 내 정보예요'}</Text></Card><Card><Text style={styles.cardTitle}>절약 점수 <Text style={styles.mint}>{score}점</Text></Text><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${Math.min(score / 10, 100)}%` }]} /></View><Text style={styles.description}>다음 레벨까지 {nextLevel}점 · 목표와 지출을 기록할수록 점수가 갱신돼요.</Text></Card><Card><ListRow icon="◈" text="내 위험 기준" action="설정" onPress={() => onOpen('risk')} /><ListRow icon="◎" text="목표 관리" action="추가" onPress={() => onOpen('goals')} /><ListRow icon="♧" text="알림 설정" action="설정" onPress={() => onOpen('notifications')} /><ListRow icon="▣" text="데이터 관리" action="관리" onPress={() => onOpen('data')} /></Card><Pressable onPress={onSignOut}><Text style={styles.logout}>{isDemo ? '체험 종료' : '로그아웃'}</Text></Pressable></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scroll}><Header title="마이" /><Text style={styles.sectionLabel}>사용자 정보</Text><View style={styles.profileRow}><View style={styles.avatar}><Text style={styles.avatarText}>●</Text></View><View><Text style={styles.name}>{displayName}님</Text><Text style={styles.description}>{isDemo ? '계정 없이 체험 중' : email}</Text></View></View><Card style={styles.balanceCard}><Text style={styles.description}>이번 달 안전 여유</Text><Text style={styles.balanceValue}>{won(Math.max(0, profile.balance - profile.warning))}</Text><Text style={styles.mint}>{isDemo ? '✦ 체험 데이터는 이 기기에만 저장돼요' : '✦ Supabase에 동기화된 내 정보예요'}</Text></Card><Card><Text style={styles.cardTitle}>절약 점수 <Text style={styles.mint}>{score}점</Text></Text><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${Math.min(score / 10, 100)}%` }]} /></View><Text style={styles.description}>다음 레벨까지 {nextLevel}점 · 목표와 지출을 기록할수록 점수가 갱신돼요.</Text></Card><Card><Text style={styles.cardTitle}>앱 기본 설정</Text><ListRow icon="◈" text="내 위험 기준" action="설정" onPress={() => onOpen('risk')} /><ListRow icon="◎" text="목표 관리" action="추가" onPress={() => onOpen('goals')} /><ListRow icon="♧" text="알림 설정" action="설정" onPress={() => onOpen('notifications')} /><ListRow icon="▣" text="데이터 관리" action="관리" onPress={() => onOpen('data')} /></Card><Pressable onPress={onSignOut}><Text style={styles.logout}>{isDemo ? '체험 종료' : '로그아웃'}</Text></Pressable></ScrollView>;
 }
 
 function RiskSettings({ profile, setProfile, onBack }: { profile: Profile; setProfile: (profile: Profile) => void; onBack: () => void }) {
@@ -528,8 +675,9 @@ function ListRow({ icon, text, action = '+ 추가', onPress }: { icon: string; t
 function Tag({ text, color }: { text: string; color: string }) { return <View style={[styles.tag, { backgroundColor: `${color}18` }]}><Text style={[styles.tagText, { color }]}>{text}</Text></View>; }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#F6F9FF' }, app: { flex: 1 }, splash: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 18 }, reelStage: { flexDirection: 'row', alignItems: 'center', gap: 16 }, reelFixed: { fontSize: 58, fontWeight: '800', color: '#1463E9' }, reelPill: { width: 116, height: 260, borderRadius: 31, overflow: 'hidden', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#B9D2FF', shadowColor: '#2563EB', shadowOpacity: 0.17, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 6 }, reelTrack: { position: 'absolute', top: 0, left: 0, right: 0 }, reelWord: { height: 52, color: '#2563EB', fontSize: 29, fontWeight: '800', textAlign: 'center', lineHeight: 52 }, reelFadeTop: { position: 'absolute', top: 0, left: 0, right: 0, height: 78, backgroundColor: 'rgba(246,249,255,0.78)' }, reelFadeBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 78, backgroundColor: 'rgba(246,249,255,0.78)' }, splashCopy: { fontSize: 19, color: '#102A43', fontWeight: '700', marginTop: 10 }, dots: { flexDirection: 'row', gap: 12, marginTop: 88 }, dot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#B8D1FF' }, dotActive: { backgroundColor: '#1463E9' }, login: { flex: 1, padding: 28, justifyContent: 'center', gap: 12 }, back: { fontSize: 42, color: '#102A43', marginBottom: 14 }, loginTitle: { fontSize: 31, fontWeight: '800', color: '#102A43', lineHeight: 41, marginBottom: 20 }, input: { borderWidth: 1, borderColor: '#C9DCF9', backgroundColor: '#FFFFFF', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, fontSize: 16, color: '#102A43' }, formGap: { marginTop: 10 }, labelWrap: { marginBottom: 12 }, label: { color: '#102A43', fontWeight: '700', marginBottom: 7 }, primary: { backgroundColor: '#2563EB', borderRadius: 12, alignItems: 'center', paddingVertical: 15, marginTop: 4 }, primaryText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' }, secondary: { borderWidth: 1, borderColor: '#B9D2FF', backgroundColor: '#FFFFFF', borderRadius: 12, alignItems: 'center', paddingVertical: 13, marginTop: 8 }, secondaryText: { color: '#102A43', fontSize: 16, fontWeight: '700' }, or: { textAlign: 'center', color: '#667085', marginTop: 8 }, signUp: { textAlign: 'center', color: '#667085', marginTop: 20 }, link: { color: '#2563EB', fontWeight: '800' }, scroll: { padding: 20, paddingBottom: 24, gap: 12 }, header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }, brand: { color: '#2563EB', fontSize: 19, fontWeight: '800', marginBottom: 7 }, title: { color: '#102A43', fontSize: 29, fontWeight: '800', letterSpacing: -1 }, headerAction: { borderWidth: 1, borderColor: '#2563EB', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9 }, headerActionText: { color: '#2563EB', fontWeight: '800' }, card: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE8FA', borderRadius: 18, padding: 15 }, cardTitle: { fontSize: 16, color: '#102A43', fontWeight: '800', marginBottom: 10 }, repeat: { fontSize: 20, fontWeight: '800', color: '#102A43', marginBottom: 10 }, barRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 7 }, barLabel: { width: 61, color: '#667085', fontSize: 12 }, barTrack: { flex: 1, height: 6, borderRadius: 4, backgroundColor: '#E6EDF9', overflow: 'hidden' }, barFill: { height: 6, borderRadius: 4, backgroundColor: '#2563EB' }, barAmount: { width: 58, textAlign: 'right', color: '#667085', fontSize: 11 }, analysis: { marginTop: 12, color: '#E5484D', fontWeight: '700', fontSize: 13 }, categoryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 12 }, category: { borderWidth: 1, borderColor: '#D8E5FA', borderRadius: 18, paddingHorizontal: 9, paddingVertical: 7 }, categorySelected: { backgroundColor: '#EAF2FF', borderColor: '#2563EB' }, categoryText: { color: '#667085', fontSize: 12 }, categoryTextSelected: { color: '#2563EB', fontWeight: '800' }, listRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' }, listIcon: { color: '#2563EB', width: 28, fontSize: 17 }, listText: { flex: 1, color: '#102A43', fontWeight: '700' }, listPlus: { color: '#2563EB', fontWeight: '700' }, statusCard: { minHeight: 120 }, statusLine: { color: '#102A43', fontWeight: '700' }, dDay: { fontSize: 45, fontWeight: '800', marginTop: 5 }, tag: { position: 'absolute', right: 15, top: 15, borderRadius: 10, paddingHorizontal: 9, paddingVertical: 5 }, tagText: { fontWeight: '800' }, metricWrap: { flexDirection: 'row', gap: 8 }, metric: { flex: 1, padding: 12, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE8FA', borderRadius: 14, alignItems: 'center' }, metricValue: { fontWeight: '800', color: '#102A43', fontSize: 13, marginTop: 7 }, red: { color: '#E5484D' }, description: { color: '#667085', lineHeight: 20, marginBottom: 10 }, mint: { color: '#12A36D', fontWeight: '800' }, goalTrack: { backgroundColor: '#E4EBF5', height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 10 }, goalFill: { width: '62%', height: 8, borderRadius: 4, backgroundColor: '#12A36D' }, goalHeader: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 }, removeText: { color: '#E5484D', fontWeight: '800', paddingVertical: 2 }, switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12, paddingVertical: 8 }, compare: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', textAlign: 'center' }, compareValue: { color: '#2563EB', fontSize: 33, fontWeight: '800', textAlign: 'center', marginTop: 5 }, arrow: { color: '#667085', fontSize: 26 }, divider: { height: 1, backgroundColor: '#E6EDF9', marginVertical: 14 }, goodCard: { backgroundColor: '#F0FBF6', borderColor: '#BCECD6' }, goodText: { color: '#0E7C55', lineHeight: 21, fontWeight: '700' }, profileRow: { flexDirection: 'row', alignItems: 'center', gap: 13, marginVertical: 5 }, avatar: { width: 55, height: 55, borderRadius: 28, backgroundColor: '#2563EB', justifyContent: 'center', alignItems: 'center' }, avatarText: { color: '#FFFFFF', fontSize: 25 }, name: { fontSize: 21, color: '#102A43', fontWeight: '800' }, balanceCard: { backgroundColor: '#F5F9FF', borderColor: '#C7DBFC' }, balanceValue: { color: '#2563EB', fontSize: 31, fontWeight: '800', marginVertical: 5 }, dangerButton: { borderWidth: 1, borderColor: '#F1B5B8', backgroundColor: '#FFFFFF', borderRadius: 12, alignItems: 'center', paddingVertical: 14, marginTop: 8 }, dangerButtonText: { color: '#E5484D', fontSize: 16, fontWeight: '800' }, logout: { textAlign: 'center', color: '#E5484D', fontWeight: '800', padding: 18 }, nav: { flexDirection: 'row', height: 72, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#DCE8FA', paddingBottom: 6 }, navItem: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 3 }, navIcon: { color: '#7A879C', fontSize: 21 }, navLabel: { color: '#7A879C', fontSize: 11 }, navActive: { color: '#2563EB', fontWeight: '800' },
+  safe: { flex: 1, backgroundColor: '#F6F9FF' }, app: { flex: 1 }, splash: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 18 }, reelStage: { flexDirection: 'row', alignItems: 'center', gap: 16 }, reelFixed: { fontSize: 58, fontWeight: '800', color: '#1463E9' }, reelPill: { width: 116, height: 260, borderRadius: 31, overflow: 'hidden', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#B9D2FF', shadowColor: '#2563EB', shadowOpacity: 0.17, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 6 }, reelTrack: { position: 'absolute', top: 0, left: 0, right: 0 }, reelWord: { height: 52, color: '#2563EB', fontSize: 29, fontWeight: '800', textAlign: 'center', lineHeight: 52 }, reelFadeTop: { position: 'absolute', top: 0, left: 0, right: 0, height: 78, backgroundColor: 'rgba(246,249,255,0.78)' }, reelFadeBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 78, backgroundColor: 'rgba(246,249,255,0.78)' }, splashCopy: { fontSize: 19, color: '#102A43', fontWeight: '700', marginTop: 10 }, dots: { flexDirection: 'row', gap: 12, marginTop: 88 }, dot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#B8D1FF' }, dotActive: { backgroundColor: '#1463E9' }, login: { flex: 1, padding: 28, justifyContent: 'center', gap: 12 }, onboarding: { padding: 24, paddingBottom: 40, gap: 12 }, onboardingEyebrow: { color: '#2563EB', fontWeight: '800', marginTop: 12 }, back: { fontSize: 42, color: '#102A43', marginBottom: 14 }, loginTitle: { fontSize: 31, fontWeight: '800', color: '#102A43', lineHeight: 41, marginBottom: 20 }, input: { borderWidth: 1, borderColor: '#C9DCF9', backgroundColor: '#FFFFFF', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, fontSize: 16, color: '#102A43' }, formGap: { marginTop: 10 }, labelWrap: { marginBottom: 12 }, label: { color: '#102A43', fontWeight: '700', marginBottom: 7 }, primary: { backgroundColor: '#2563EB', borderRadius: 12, alignItems: 'center', paddingVertical: 15, marginTop: 4 }, primaryText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' }, secondary: { borderWidth: 1, borderColor: '#B9D2FF', backgroundColor: '#FFFFFF', borderRadius: 12, alignItems: 'center', paddingVertical: 13, marginTop: 8 }, secondaryText: { color: '#102A43', fontSize: 16, fontWeight: '700' }, or: { textAlign: 'center', color: '#667085', marginTop: 8 }, signUp: { textAlign: 'center', color: '#667085', marginTop: 20 }, link: { color: '#2563EB', fontWeight: '800' }, scroll: { padding: 20, paddingBottom: 24, gap: 12 }, header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }, brand: { color: '#2563EB', fontSize: 19, fontWeight: '800', marginBottom: 7 }, title: { color: '#102A43', fontSize: 29, fontWeight: '800', letterSpacing: -1 }, headerAction: { borderWidth: 1, borderColor: '#2563EB', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9 }, headerActionText: { color: '#2563EB', fontWeight: '800' }, card: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE8FA', borderRadius: 18, padding: 15 }, cardTitle: { fontSize: 16, color: '#102A43', fontWeight: '800', marginBottom: 10 }, repeat: { fontSize: 20, fontWeight: '800', color: '#102A43', marginBottom: 10 }, barRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 7 }, barLabel: { width: 61, color: '#667085', fontSize: 12 }, barTrack: { flex: 1, height: 6, borderRadius: 4, backgroundColor: '#E6EDF9', overflow: 'hidden' }, barFill: { height: 6, borderRadius: 4, backgroundColor: '#2563EB' }, barAmount: { width: 58, textAlign: 'right', color: '#667085', fontSize: 11 }, analysis: { marginTop: 12, color: '#E5484D', fontWeight: '700', fontSize: 13 }, categoryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 12 }, category: { borderWidth: 1, borderColor: '#D8E5FA', borderRadius: 18, paddingHorizontal: 9, paddingVertical: 7 }, categorySelected: { backgroundColor: '#EAF2FF', borderColor: '#2563EB' }, categoryText: { color: '#667085', fontSize: 12 }, categoryTextSelected: { color: '#2563EB', fontWeight: '800' }, listRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' }, listIcon: { color: '#2563EB', width: 28, fontSize: 17 }, listText: { flex: 1, color: '#102A43', fontWeight: '700' }, listPlus: { color: '#2563EB', fontWeight: '700' }, statusCard: { minHeight: 120 }, statusLine: { color: '#102A43', fontWeight: '700' }, dDay: { fontSize: 45, fontWeight: '800', marginTop: 5 }, tag: { position: 'absolute', right: 15, top: 15, borderRadius: 10, paddingHorizontal: 9, paddingVertical: 5 }, tagText: { fontWeight: '800' }, metricWrap: { flexDirection: 'row', gap: 8 }, metric: { flex: 1, padding: 12, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE8FA', borderRadius: 14, alignItems: 'center' }, metricValue: { fontWeight: '800', color: '#102A43', fontSize: 17, marginTop: 7 }, red: { color: '#E5484D' }, description: { color: '#667085', lineHeight: 20, marginBottom: 10 }, mint: { color: '#12A36D', fontWeight: '800' }, goalTrack: { backgroundColor: '#E4EBF5', height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 10 }, goalFill: { width: '62%', height: 8, borderRadius: 4, backgroundColor: '#12A36D' }, goalHeader: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 }, removeText: { color: '#E5484D', fontWeight: '800', paddingVertical: 2 }, switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12, paddingVertical: 8 }, compare: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', textAlign: 'center' }, compareValue: { color: '#2563EB', fontSize: 36, fontWeight: '800', textAlign: 'center', marginTop: 5 }, arrow: { color: '#667085', fontSize: 26 }, divider: { height: 1, backgroundColor: '#E6EDF9', marginVertical: 14 }, goodCard: { backgroundColor: '#F0FBF6', borderColor: '#BCECD6' }, goodText: { color: '#0E7C55', lineHeight: 21, fontWeight: '700' }, profileRow: { flexDirection: 'row', alignItems: 'center', gap: 13, marginVertical: 5 }, avatar: { width: 55, height: 55, borderRadius: 28, backgroundColor: '#2563EB', justifyContent: 'center', alignItems: 'center' }, avatarText: { color: '#FFFFFF', fontSize: 25 }, name: { fontSize: 21, color: '#102A43', fontWeight: '800' }, sectionLabel: { color: '#667085', fontSize: 12, fontWeight: '700' }, balanceCard: { backgroundColor: '#F5F9FF', borderColor: '#C7DBFC' }, balanceValue: { color: '#2563EB', fontSize: 31, fontWeight: '800', marginVertical: 5 }, dangerButton: { borderWidth: 1, borderColor: '#F1B5B8', backgroundColor: '#FFFFFF', borderRadius: 12, alignItems: 'center', paddingVertical: 14, marginTop: 8 }, dangerButtonText: { color: '#E5484D', fontSize: 16, fontWeight: '800' }, logout: { textAlign: 'center', color: '#E5484D', fontWeight: '800', padding: 18 }, nav: { flexDirection: 'row', height: 72, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#DCE8FA', paddingBottom: 6 }, navItem: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 3 }, navIcon: { color: '#7A879C', fontSize: 21 }, navLabel: { color: '#7A879C', fontSize: 11 }, navActive: { color: '#2563EB', fontWeight: '800' },
   authHint: { color: '#667085', textAlign: 'center', lineHeight: 19, marginTop: 6 }, syncScreen: { flex: 1, padding: 28, alignItems: 'center', justifyContent: 'center' }, syncTitle: { color: '#102A43', fontSize: 24, fontWeight: '800', marginBottom: 10 },
   cashFlowRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingLeft: 28, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' }, cashFlowIcon: { width: 25, color: '#12A36D', fontSize: 17, fontWeight: '800' }, cashFlowCopy: { flex: 1 }, cashFlowTitle: { color: '#102A43', fontWeight: '700' }, cashFlowDate: { color: '#7A879C', fontSize: 11, marginTop: 2 }, cashFlowAmount: { color: '#12A36D', fontWeight: '800', fontSize: 13 },
   goalSummary: { paddingVertical: 10, paddingLeft: 28, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' },
+  calendarHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }, calendarTitle: { color: '#102A43', fontWeight: '800', fontSize: 18 }, calendarMove: { color: '#2563EB', fontSize: 28, fontWeight: '800', paddingHorizontal: 9 }, calendarGrid: { flexDirection: 'row', flexWrap: 'wrap' }, calendarWeekCell: { width: '14.2857%', alignItems: 'center', paddingBottom: 6 }, calendarWeek: { color: '#7A879C', fontSize: 11, fontWeight: '700' }, calendarCell: { width: '14.2857%', minHeight: 54, padding: 3, borderTopWidth: 1, borderTopColor: '#ECF1FA' }, calendarToday: { backgroundColor: '#EAF2FF', borderRadius: 8 }, calendarDay: { color: '#52616F', fontSize: 11 }, calendarDayToday: { color: '#2563EB', fontWeight: '800' }, calendarIncome: { color: '#12A36D', fontSize: 9, fontWeight: '800', marginTop: 2 }, calendarExpense: { color: '#E5484D', fontSize: 9, fontWeight: '800', marginTop: 2 }, calendarLegend: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 8 }, formula: { color: '#102A43', fontWeight: '700', lineHeight: 22, marginBottom: 10 }, algorithmNumber: { color: '#2563EB', fontSize: 20, fontWeight: '800', marginBottom: 10 }, aiBasis: { color: '#7A879C', fontSize: 11, marginBottom: 12 }, goalBigNumber: { color: '#102A43', fontSize: 18, fontWeight: '800', marginBottom: 7 }, resultNumber: { color: '#102A43', fontSize: 18, fontWeight: '800', textAlign: 'center' }, goalDateNumber: { color: '#2563EB', fontSize: 18, fontWeight: '800', textAlign: 'center' },
 });
