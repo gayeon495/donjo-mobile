@@ -4,3 +4,4 @@ node_modules/
 .expo-ios-check/
 dist/
 *.log
+.env
