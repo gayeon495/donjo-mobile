@@ -32,7 +32,6 @@ type MyView = 'home' | 'risk' | 'goals' | 'notifications' | 'data';
 
 const LEGACY_STORE_KEY = '@donjo-profile-v1';
 const DEMO_MODE_KEY = '@donjo-demo-mode-v1';
-const ONBOARDING_STORE_PREFIX = '@donjo-onboarding-v1';
 const categories: Category[] = ['식비', '카페·배달', '쇼핑', '교통', '기타'];
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const newId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (token) => {
@@ -41,7 +40,6 @@ const newId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (tok
 });
 const validId = (id: string) => uuidPattern.test(id) ? id : newId();
 const userStoreKey = (userId: string) => `@donjo-profile-v2:${userId}`;
-const onboardingStoreKey = (userId?: string) => `${ONBOARDING_STORE_PREFIX}:${userId ?? 'demo'}`;
 const won = (value: number) => `${Math.round(value).toLocaleString('ko-KR')}원`;
 const dateOffset = (days: number) => {
   const d = new Date();
@@ -168,8 +166,6 @@ export default function App() {
   const [authReady, setAuthReady] = useState(!supabase);
   const [session, setSession] = useState<Session | null>(null);
   const [isDemo, setIsDemo] = useState(false);
-  const [onboardingReady, setOnboardingReady] = useState(false);
-  const [onboardingComplete, setOnboardingComplete] = useState(false);
   const [cloudReady, setCloudReady] = useState(false);
   const [syncState, setSyncState] = useState('');
   const [tab, setTab] = useState<Tab>('past');
@@ -298,22 +294,6 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [profile, ready, isDemo]);
 
-  useEffect(() => {
-    if (!ready || (!isDemo && !session?.user)) return;
-    let active = true;
-    setOnboardingReady(false);
-    AsyncStorage.getItem(onboardingStoreKey(session?.user.id)).then((value) => {
-      if (!active) return;
-      setOnboardingComplete(value === 'true');
-      setOnboardingReady(true);
-    }).catch(() => {
-      if (!active) return;
-      setOnboardingComplete(false);
-      setOnboardingReady(true);
-    });
-    return () => { active = false; };
-  }, [ready, isDemo, session?.user.id]);
-
   const forecast = useMemo(() => calculate(profile, 90), [profile]);
   const status = useMemo(() => statusFor(profile, forecast), [profile, forecast]);
   const categoryTotals = useMemo(() => categories.map((category) => ({
@@ -334,9 +314,6 @@ export default function App() {
   const afterForecast = useMemo(() => calculate(profile, 90, cut), [profile, cut]);
   const afterStatus = useMemo(() => statusFor(profile, afterForecast), [profile, afterForecast]);
 
-  const updateNumber = (key: 'balance' | 'warning' | 'danger', value: string) => {
-    setProfile((current) => ({ ...current, [key]: numberFrom(value) }));
-  };
   const addExpense = () => {
     const amount = numberFrom(newAmount);
     if (!newTitle.trim() || amount <= 0) return Alert.alert('항목과 금액을 입력해 주세요.');
@@ -355,12 +332,6 @@ export default function App() {
     await AsyncStorage.setItem(DEMO_MODE_KEY, 'true');
   };
 
-  const completeOnboarding = async (nextProfile: Profile) => {
-    setProfile(nextProfile);
-    await AsyncStorage.setItem(onboardingStoreKey(session?.user.id), 'true');
-    setOnboardingComplete(true);
-  };
-
   const signOut = async () => {
     if (isDemo) {
       await AsyncStorage.removeItem(DEMO_MODE_KEY);
@@ -377,8 +348,6 @@ export default function App() {
   if (!ready || !authReady) return <Splash />;
   if (!session && !isDemo) return <Login onTryDemo={enterDemo} />;
   if (!cloudReady && !isDemo) return <SyncScreen message={syncState} />;
-  if (!onboardingReady) return <SyncScreen message="최초 설정을 확인하는 중이에요." />;
-  if (!onboardingComplete) return <Onboarding profile={profile} onComplete={completeOnboarding} />;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -413,33 +382,6 @@ function Splash() {
     return () => clearInterval(timer);
   }, []);
   return <SafeAreaView style={styles.safe}><View style={styles.splash}><View style={styles.reelStage}><Text style={styles.reelFixed}>돈</Text><View style={styles.reelPill}><Animated.View style={[styles.reelTrack, { transform: [{ translateY: offset }] }]}>{[...words, ...words].map((word, index) => <Text key={`${word}-${index}`} style={styles.reelWord}>{word}</Text>)}</Animated.View><View pointerEvents="none" style={styles.reelFadeTop} /><View pointerEvents="none" style={styles.reelFadeBottom} /></View><Text style={styles.reelFixed}>조</Text></View><Text style={styles.splashCopy}>나의 돈을 지켜조</Text><View style={styles.dots}>{[0, 1, 2].map((index) => <View key={index} style={[styles.dot, step === index && styles.dotActive]} />)}</View></View></SafeAreaView>;
-}
-
-function Onboarding({ profile, onComplete }: { profile: Profile; onComplete: (profile: Profile) => void }) {
-  const primaryGoal = profile.goals[0];
-  const [balance, setBalance] = useState(String(profile.balance));
-  const [warning, setWarning] = useState(String(profile.warning));
-  const [danger, setDanger] = useState(String(profile.danger));
-  const [goalTitle, setGoalTitle] = useState(primaryGoal?.title ?? '');
-  const [goalTarget, setGoalTarget] = useState(String(primaryGoal?.targetAmount ?? ''));
-  const [goalSaved, setGoalSaved] = useState(String(primaryGoal?.savedAmount ?? 0));
-  const [goalDate, setGoalDate] = useState(primaryGoal?.targetDate ?? dateOffset(180));
-
-  const save = () => {
-    const nextBalance = numberFrom(balance);
-    const nextWarning = numberFrom(warning);
-    const nextDanger = numberFrom(danger);
-    const targetAmount = numberFrom(goalTarget);
-    const savedAmount = numberFrom(goalSaved);
-    if (nextWarning <= nextDanger) return Alert.alert('경고 잔액은 위험 잔액보다 크게 설정해 주세요.');
-    if (!goalTitle.trim() || targetAmount <= 0) return Alert.alert('개인 목표와 목표 금액을 입력해 주세요.');
-    if (savedAmount > targetAmount) return Alert.alert('현재 모은 금액은 목표 금액보다 클 수 없어요.');
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(goalDate)) return Alert.alert('목표일을 YYYY-MM-DD 형식으로 입력해 주세요.');
-    const goal: Goal = { id: primaryGoal?.id ?? newId(), title: goalTitle.trim(), targetAmount, savedAmount, targetDate: goalDate };
-    onComplete({ ...profile, balance: nextBalance, warning: nextWarning, danger: nextDanger, goals: primaryGoal ? [goal, ...profile.goals.slice(1)] : [goal] });
-  };
-
-  return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.onboarding}><Text style={styles.onboardingEyebrow}>처음 한 번만 설정해요</Text><Text style={styles.loginTitle}>내 돈의 기준을,{`\n`}먼저 알려주세요</Text><Card><Text style={styles.cardTitle}>잔액 기준</Text><Label text="현재 잔액"><TextInput value={balance} onChangeText={setBalance} keyboardType="number-pad" style={styles.input} /></Label><Label text="경고 잔액"><TextInput value={warning} onChangeText={setWarning} keyboardType="number-pad" style={styles.input} /></Label><Label text="위험 잔액"><TextInput value={danger} onChangeText={setDanger} keyboardType="number-pad" style={styles.input} /></Label></Card><Card><Text style={styles.cardTitle}>개인 목표</Text><TextInput value={goalTitle} onChangeText={setGoalTitle} placeholder="목표명" style={styles.input} /><TextInput value={goalTarget} onChangeText={setGoalTarget} placeholder="목표 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={goalSaved} onChangeText={setGoalSaved} placeholder="현재 모은 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={goalDate} onChangeText={setGoalDate} placeholder="목표일 YYYY-MM-DD" style={[styles.input, styles.formGap]} /></Card><Primary text="설정하고 시작하기" onPress={save} /></ScrollView></SafeAreaView>;
 }
 
 function Login({ onTryDemo }: { onTryDemo: () => void }) {
@@ -485,9 +427,11 @@ function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmo
   const [goalTarget, setGoalTarget] = useState('');
   const [goalSaved, setGoalSaved] = useState('');
   const [goalDate, setGoalDate] = useState(dateOffset(180));
+  const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
 
   const openCashFlowForm = (type: 'income' | 'fixed') => {
     setGoalFormOpen(false);
+    setEditingGoalId(null);
     setCashFlowType(type);
     setCashFlowTitle('');
     setCashFlowAmount('');
@@ -498,9 +442,6 @@ function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmo
     const amount = numberFrom(cashFlowAmount);
     if (!cashFlowType || !cashFlowTitle.trim() || amount <= 0) {
       return Alert.alert('항목과 금액을 입력해 주세요.');
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(cashFlowDate)) {
-      return Alert.alert('날짜를 YYYY-MM-DD 형식으로 입력해 주세요.');
     }
     setProfile((current: Profile) => ({
       ...current,
@@ -515,13 +456,14 @@ function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmo
     setCashFlowType(null);
   };
 
-  const openGoalForm = () => {
+  const openGoalForm = (goal?: Goal) => {
     setCashFlowType(null);
     setGoalFormOpen(true);
-    setGoalTitle('');
-    setGoalTarget('');
-    setGoalSaved('');
-    setGoalDate(dateOffset(180));
+    setEditingGoalId(goal?.id ?? null);
+    setGoalTitle(goal?.title ?? '');
+    setGoalTarget(goal ? String(goal.targetAmount) : '');
+    setGoalSaved(goal ? String(goal.savedAmount) : '');
+    setGoalDate(goal?.targetDate ?? dateOffset(180));
   };
 
   const addGoal = () => {
@@ -530,27 +472,23 @@ function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmo
     if (!goalTitle.trim() || targetAmount <= 0) {
       return Alert.alert('목표명과 목표 금액을 입력해 주세요.');
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(goalDate)) {
-      return Alert.alert('목표일을 YYYY-MM-DD 형식으로 입력해 주세요.');
-    }
     if (savedAmount > targetAmount) {
       return Alert.alert('현재 모은 금액은 목표 금액보다 클 수 없어요.');
     }
     setProfile((current: Profile) => ({
       ...current,
-      goals: [...current.goals, {
-        id: newId(),
-        title: goalTitle.trim(),
-        targetAmount,
-        savedAmount,
-        targetDate: goalDate,
-      }],
+      goals: editingGoalId
+        ? current.goals.map((goal) => goal.id === editingGoalId
+          ? { ...goal, title: goalTitle.trim(), targetAmount, savedAmount, targetDate: goalDate }
+          : goal)
+        : [...current.goals, { id: newId(), title: goalTitle.trim(), targetAmount, savedAmount, targetDate: goalDate }],
     }));
     setGoalFormOpen(false);
+    setEditingGoalId(null);
   };
 
   return <ScrollView contentContainerStyle={styles.scroll}><Header title="돈 정보 입력" />
-    <Card><Label text="현재 사용 가능 잔액"><MoneyInput value={profile.balance} onChange={(value: string) => setProfile({ ...profile, balance: numberFrom(value) })} /></Label><Label text="경고 잔액"><MoneyInput value={profile.warning} onChange={(value: string) => setProfile({ ...profile, warning: numberFrom(value) })} /></Label><Label text="위험 잔액"><MoneyInput value={profile.danger} onChange={(value: string) => setProfile({ ...profile, danger: numberFrom(value) })} /></Label></Card>
+    <Card><Text style={styles.cardTitle}>잔액 설정</Text><Label text="현재 잔액을 입력하세요"><MoneyInput value={profile.balance} onChange={(value: string) => setProfile({ ...profile, balance: numberFrom(value) })} /></Label><Label text="경고 잔액을 입력하세요"><MoneyInput value={profile.warning} onChange={(value: string) => setProfile({ ...profile, warning: numberFrom(value) })} /></Label><Label text="위험 잔액을 입력하세요"><MoneyInput value={profile.danger} onChange={(value: string) => setProfile({ ...profile, danger: numberFrom(value) })} /></Label></Card>
     <MonthlyCalendar profile={profile} />
     <Card><Text style={styles.cardTitle}>✦ 소비 패턴 분석</Text>{repeat && <Text style={styles.repeat}>{repeat[0]} {repeat[1].count}회 · {won(repeat[1].amount)}</Text>}{totals.map((item: any) => <View key={item.category} style={styles.barRow}><Text style={styles.barLabel}>{item.category}</Text><View style={styles.barTrack}><View style={[styles.barFill, { width: `${Math.max(4, item.total / maxTotal * 100)}%` }]} /></View><Text style={styles.barAmount}>{won(item.total)}</Text></View>)}<Text style={styles.analysis}>{insight.feedback}</Text></Card>
     <Card><Text style={styles.cardTitle}>최근 지출 추가</Text><TextInput value={newTitle} onChangeText={setNewTitle} placeholder="사용처·항목" style={styles.input} /><TextInput value={newAmount} onChangeText={setNewAmount} placeholder="금액" keyboardType="number-pad" style={styles.input} /><View style={styles.categoryRow}>{categories.map((item) => <Pressable key={item} onPress={() => setCategory(item)} style={[styles.category, category === item && styles.categorySelected]}><Text style={[styles.categoryText, category === item && styles.categoryTextSelected]}>{item}</Text></Pressable>)}</View><Primary text="지출 추가" onPress={addExpense} /></Card>
@@ -559,11 +497,11 @@ function Past({ profile, setProfile, newTitle, setNewTitle, newAmount, setNewAmo
       {profile.cashFlows.filter((item: CashFlow) => item.type === 'income').map((item: CashFlow) => <CashFlowRow key={item.id} item={item} />)}
       <ListRow icon="−" text="고정지출" action="+ 추가" onPress={() => openCashFlowForm('fixed')} />
       {profile.cashFlows.filter((item: CashFlow) => item.type === 'fixed').map((item: CashFlow) => <CashFlowRow key={item.id} item={item} />)}
-      <ListRow icon="◎" text="목표" action="+ 추가" onPress={openGoalForm} />
-      {profile.goals.map((goal: Goal) => <GoalSummaryRow key={goal.id} goal={goal} />)}
+      <ListRow icon="◎" text="목표" action="+ 추가" onPress={() => openGoalForm()} />
+      {profile.goals.map((goal: Goal) => <GoalSummaryRow key={goal.id} goal={goal} onEdit={() => openGoalForm(goal)} />)}
     </Card>
-    {cashFlowType && <Card><Text style={styles.cardTitle}>{cashFlowType === 'income' ? '새 예정 수입' : '새 고정지출'}</Text><TextInput value={cashFlowTitle} onChangeText={setCashFlowTitle} placeholder={cashFlowType === 'income' ? '수입 항목 (예: 알바비)' : '지출 항목 (예: 월세)'} style={styles.input} /><TextInput value={cashFlowAmount} onChangeText={setCashFlowAmount} placeholder="금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={cashFlowDate} onChangeText={setCashFlowDate} placeholder="날짜 YYYY-MM-DD" style={[styles.input, styles.formGap]} /><Primary text={cashFlowType === 'income' ? '예정 수입 저장' : '고정지출 저장'} onPress={addCashFlow} /><Secondary text="취소" onPress={() => setCashFlowType(null)} /></Card>}
-    {goalFormOpen && <Card><Text style={styles.cardTitle}>새 목표</Text><TextInput value={goalTitle} onChangeText={setGoalTitle} placeholder="목표명 (예: 여행 자금)" style={styles.input} /><TextInput value={goalTarget} onChangeText={setGoalTarget} placeholder="목표 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={goalSaved} onChangeText={setGoalSaved} placeholder="현재 모은 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={goalDate} onChangeText={setGoalDate} placeholder="목표일 YYYY-MM-DD" style={[styles.input, styles.formGap]} /><Primary text="목표 저장" onPress={addGoal} /><Secondary text="취소" onPress={() => setGoalFormOpen(false)} /></Card>}
+    {cashFlowType && <Card><Text style={styles.cardTitle}>{cashFlowType === 'income' ? '새 예정 수입' : '새 고정지출'}</Text><TextInput value={cashFlowTitle} onChangeText={setCashFlowTitle} placeholder={cashFlowType === 'income' ? '수입 항목 (예: 알바비)' : '지출 항목 (예: 월세)'} style={styles.input} /><TextInput value={cashFlowAmount} onChangeText={setCashFlowAmount} placeholder="금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><DateSelector label="날짜 선택" value={cashFlowDate} onChange={setCashFlowDate} /><Primary text={cashFlowType === 'income' ? '예정 수입 저장' : '고정지출 저장'} onPress={addCashFlow} /><Secondary text="취소" onPress={() => setCashFlowType(null)} /></Card>}
+    {goalFormOpen && <Card><Text style={styles.cardTitle}>{editingGoalId ? '목표 수정' : '새 목표'}</Text><TextInput value={goalTitle} onChangeText={setGoalTitle} placeholder="목표명 (예: 여행 자금)" style={styles.input} /><TextInput value={goalTarget} onChangeText={setGoalTarget} placeholder="목표 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={goalSaved} onChangeText={setGoalSaved} placeholder="현재 모은 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><DateSelector label="목표일 선택" value={goalDate} onChange={setGoalDate} /><Primary text={editingGoalId ? '수정 저장' : '목표 저장'} onPress={addGoal} /><Secondary text="취소" onPress={() => { setGoalFormOpen(false); setEditingGoalId(null); }} /></Card>}
   </ScrollView>;
 }
 
@@ -597,9 +535,9 @@ function CashFlowRow({ item }: { item: CashFlow }) {
   return <View style={styles.cashFlowRow}><Text style={[styles.cashFlowIcon, !isIncome && styles.red]}>{isIncome ? '+' : '−'}</Text><View style={styles.cashFlowCopy}><Text style={styles.cashFlowTitle}>{item.title}</Text><Text style={styles.cashFlowDate}>{item.date}</Text></View><Text style={[styles.cashFlowAmount, !isIncome && styles.red]}>{isIncome ? '+' : '−'}{won(item.amount)}</Text></View>;
 }
 
-function GoalSummaryRow({ goal }: { goal: Goal }) {
+function GoalSummaryRow({ goal, onEdit }: { goal: Goal; onEdit: () => void }) {
   const progress = Math.min(100, goal.savedAmount / Math.max(goal.targetAmount, 1) * 100);
-  return <View style={styles.goalSummary}><View style={styles.cashFlowCopy}><Text style={styles.cashFlowTitle}>{goal.title}</Text><Text style={styles.cashFlowDate}>{won(goal.savedAmount)} / {won(goal.targetAmount)} · {goal.targetDate}</Text><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${progress}%` }]} /></View></View></View>;
+  return <View style={styles.goalSummary}><View style={styles.cashFlowCopy}><View style={styles.goalSummaryHeader}><Text style={styles.cashFlowTitle}>{goal.title}</Text><Pressable accessibilityRole="button" accessibilityLabel={`${goal.title} 목표 수정`} onPress={onEdit}><Text style={styles.editText}>수정</Text></Pressable></View><Text style={styles.cashFlowDate}>{won(goal.savedAmount)} / {won(goal.targetAmount)} · {goal.targetDate}</Text><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${progress}%` }]} /></View></View></View>;
 }
 
 function Future({ profile, forecast, status, insight, onWhatIf }: any) {
@@ -651,7 +589,7 @@ function GoalSettings({ profile, setProfile, onBack }: { profile: Profile; setPr
     setProfile({ ...profile, goals: [...profile.goals, { id: newId(), title: title.trim(), targetAmount, savedAmount: numberFrom(saved), targetDate }] });
     setTitle(''); setTarget(''); setSaved(''); setTargetDate(dateOffset(180));
   };
-  return <ScrollView contentContainerStyle={styles.scroll}><Header title="목표 관리" action="마이로" onAction={onBack} /><Card><Text style={styles.cardTitle}>새 목표 추가</Text><TextInput value={title} onChangeText={setTitle} placeholder="목표명 (예: 여행 자금)" style={styles.input} /><TextInput value={target} onChangeText={setTarget} placeholder="목표 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={saved} onChangeText={setSaved} placeholder="현재 모은 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={targetDate} onChangeText={setTargetDate} placeholder="목표일 YYYY-MM-DD" style={[styles.input, styles.formGap]} /><Primary text="목표 추가" onPress={addGoal} /></Card>{profile.goals.map((goal) => <Card key={goal.id}><View style={styles.goalHeader}><View><Text style={styles.cardTitle}>{goal.title}</Text><Text style={styles.description}>{won(goal.savedAmount)} / {won(goal.targetAmount)} · {goal.targetDate}</Text></View><Pressable onPress={() => setProfile({ ...profile, goals: profile.goals.filter((item) => item.id !== goal.id) })}><Text style={styles.removeText}>삭제</Text></Pressable></View><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${Math.min(100, goal.savedAmount / Math.max(goal.targetAmount, 1) * 100)}%` }]} /></View></Card>)}</ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scroll}><Header title="목표 관리" action="마이로" onAction={onBack} /><Card><Text style={styles.cardTitle}>새 목표 추가</Text><TextInput value={title} onChangeText={setTitle} placeholder="목표명 (예: 여행 자금)" style={styles.input} /><TextInput value={target} onChangeText={setTarget} placeholder="목표 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><TextInput value={saved} onChangeText={setSaved} placeholder="현재 모은 금액" keyboardType="number-pad" style={[styles.input, styles.formGap]} /><DateSelector label="목표일 선택" value={targetDate} onChange={setTargetDate} /><Primary text="목표 추가" onPress={addGoal} /></Card>{profile.goals.map((goal) => <Card key={goal.id}><View style={styles.goalHeader}><View><Text style={styles.cardTitle}>{goal.title}</Text><Text style={styles.description}>{won(goal.savedAmount)} / {won(goal.targetAmount)} · {goal.targetDate}</Text></View><Pressable onPress={() => setProfile({ ...profile, goals: profile.goals.filter((item) => item.id !== goal.id) })}><Text style={styles.removeText}>삭제</Text></Pressable></View><View style={styles.goalTrack}><View style={[styles.goalFill, { width: `${Math.min(100, goal.savedAmount / Math.max(goal.targetAmount, 1) * 100)}%` }]} /></View></Card>)}</ScrollView>;
 }
 
 function NotificationSettings({ profile, setProfile, onBack }: { profile: Profile; setProfile: (profile: Profile) => void; onBack: () => void }) {
@@ -674,10 +612,32 @@ function Secondary({ text, onPress }: { text: string; onPress?: () => void }) { 
 function ListRow({ icon, text, action = '+ 추가', onPress }: { icon: string; text: string; action?: string; onPress?: () => void }) { const body = <><Text style={styles.listIcon}>{icon}</Text><Text style={styles.listText}>{text}</Text><Text style={styles.listPlus}>{action}</Text></>; return onPress ? <Pressable style={styles.listRow} onPress={onPress}>{body}</Pressable> : <View style={styles.listRow}>{body}</View>; }
 function Tag({ text, color }: { text: string; color: string }) { return <View style={[styles.tag, { backgroundColor: `${color}18` }]}><Text style={[styles.tagText, { color }]}>{text}</Text></View>; }
 
+function DateSelector({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00`) : new Date();
+  const year = parsed.getFullYear();
+  const month = parsed.getMonth() + 1;
+  const day = parsed.getDate();
+  const setDate = (nextYear: number, nextMonth: number, nextDay: number) => {
+    const normalizedMonth = Math.min(12, Math.max(1, nextMonth));
+    const maxDay = new Date(nextYear, normalizedMonth, 0).getDate();
+    onChange(`${nextYear}-${String(normalizedMonth).padStart(2, '0')}-${String(Math.min(maxDay, Math.max(1, nextDay))).padStart(2, '0')}`);
+  };
+  const moveMonth = (amount: number) => {
+    const next = new Date(year, month - 1 + amount, 1);
+    setDate(next.getFullYear(), next.getMonth() + 1, day);
+  };
+  const maxDay = new Date(year, month, 0).getDate();
+  return <View style={styles.dateSelector}><Text style={styles.label}>{label}</Text><View style={styles.dateSelectorRow}><DateStep label="연도" value={`${year}년`} onDecrease={() => setDate(year - 1, month, day)} onIncrease={() => setDate(year + 1, month, day)} /><DateStep label="월" value={`${month}월`} onDecrease={() => moveMonth(-1)} onIncrease={() => moveMonth(1)} /><DateStep label="일" value={`${day}일`} onDecrease={() => setDate(year, month, day === 1 ? maxDay : day - 1)} onIncrease={() => setDate(year, month, day === maxDay ? 1 : day + 1)} /></View></View>;
+}
+
+function DateStep({ label, value, onDecrease, onIncrease }: { label: string; value: string; onDecrease: () => void; onIncrease: () => void }) {
+  return <View style={styles.dateStep}><Pressable accessibilityRole="button" accessibilityLabel={`${label} 줄이기`} style={styles.dateButton} onPress={onDecrease}><Text style={styles.dateButtonText}>−</Text></Pressable><Text style={styles.dateValue}>{value}</Text><Pressable accessibilityRole="button" accessibilityLabel={`${label} 늘리기`} style={styles.dateButton} onPress={onIncrease}><Text style={styles.dateButtonText}>+</Text></Pressable></View>;
+}
+
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#F6F9FF' }, app: { flex: 1 }, splash: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 18 }, reelStage: { flexDirection: 'row', alignItems: 'center', gap: 16 }, reelFixed: { fontSize: 58, fontWeight: '800', color: '#1463E9' }, reelPill: { width: 116, height: 260, borderRadius: 31, overflow: 'hidden', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#B9D2FF', shadowColor: '#2563EB', shadowOpacity: 0.17, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 6 }, reelTrack: { position: 'absolute', top: 0, left: 0, right: 0 }, reelWord: { height: 52, color: '#2563EB', fontSize: 29, fontWeight: '800', textAlign: 'center', lineHeight: 52 }, reelFadeTop: { position: 'absolute', top: 0, left: 0, right: 0, height: 78, backgroundColor: 'rgba(246,249,255,0.78)' }, reelFadeBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 78, backgroundColor: 'rgba(246,249,255,0.78)' }, splashCopy: { fontSize: 19, color: '#102A43', fontWeight: '700', marginTop: 10 }, dots: { flexDirection: 'row', gap: 12, marginTop: 88 }, dot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#B8D1FF' }, dotActive: { backgroundColor: '#1463E9' }, login: { flex: 1, padding: 28, justifyContent: 'center', gap: 12 }, onboarding: { padding: 24, paddingBottom: 40, gap: 12 }, onboardingEyebrow: { color: '#2563EB', fontWeight: '800', marginTop: 12 }, back: { fontSize: 42, color: '#102A43', marginBottom: 14 }, loginTitle: { fontSize: 31, fontWeight: '800', color: '#102A43', lineHeight: 41, marginBottom: 20 }, input: { borderWidth: 1, borderColor: '#C9DCF9', backgroundColor: '#FFFFFF', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, fontSize: 16, color: '#102A43' }, formGap: { marginTop: 10 }, labelWrap: { marginBottom: 12 }, label: { color: '#102A43', fontWeight: '700', marginBottom: 7 }, primary: { backgroundColor: '#2563EB', borderRadius: 12, alignItems: 'center', paddingVertical: 15, marginTop: 4 }, primaryText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' }, secondary: { borderWidth: 1, borderColor: '#B9D2FF', backgroundColor: '#FFFFFF', borderRadius: 12, alignItems: 'center', paddingVertical: 13, marginTop: 8 }, secondaryText: { color: '#102A43', fontSize: 16, fontWeight: '700' }, or: { textAlign: 'center', color: '#667085', marginTop: 8 }, signUp: { textAlign: 'center', color: '#667085', marginTop: 20 }, link: { color: '#2563EB', fontWeight: '800' }, scroll: { padding: 20, paddingBottom: 24, gap: 12 }, header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }, brand: { color: '#2563EB', fontSize: 19, fontWeight: '800', marginBottom: 7 }, title: { color: '#102A43', fontSize: 29, fontWeight: '800', letterSpacing: -1 }, headerAction: { borderWidth: 1, borderColor: '#2563EB', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9 }, headerActionText: { color: '#2563EB', fontWeight: '800' }, card: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE8FA', borderRadius: 18, padding: 15 }, cardTitle: { fontSize: 16, color: '#102A43', fontWeight: '800', marginBottom: 10 }, repeat: { fontSize: 20, fontWeight: '800', color: '#102A43', marginBottom: 10 }, barRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 7 }, barLabel: { width: 61, color: '#667085', fontSize: 12 }, barTrack: { flex: 1, height: 6, borderRadius: 4, backgroundColor: '#E6EDF9', overflow: 'hidden' }, barFill: { height: 6, borderRadius: 4, backgroundColor: '#2563EB' }, barAmount: { width: 58, textAlign: 'right', color: '#667085', fontSize: 11 }, analysis: { marginTop: 12, color: '#E5484D', fontWeight: '700', fontSize: 13 }, categoryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 12 }, category: { borderWidth: 1, borderColor: '#D8E5FA', borderRadius: 18, paddingHorizontal: 9, paddingVertical: 7 }, categorySelected: { backgroundColor: '#EAF2FF', borderColor: '#2563EB' }, categoryText: { color: '#667085', fontSize: 12 }, categoryTextSelected: { color: '#2563EB', fontWeight: '800' }, listRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' }, listIcon: { color: '#2563EB', width: 28, fontSize: 17 }, listText: { flex: 1, color: '#102A43', fontWeight: '700' }, listPlus: { color: '#2563EB', fontWeight: '700' }, statusCard: { minHeight: 120 }, statusLine: { color: '#102A43', fontWeight: '700' }, dDay: { fontSize: 45, fontWeight: '800', marginTop: 5 }, tag: { position: 'absolute', right: 15, top: 15, borderRadius: 10, paddingHorizontal: 9, paddingVertical: 5 }, tagText: { fontWeight: '800' }, metricWrap: { flexDirection: 'row', gap: 8 }, metric: { flex: 1, padding: 12, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE8FA', borderRadius: 14, alignItems: 'center' }, metricValue: { fontWeight: '800', color: '#102A43', fontSize: 17, marginTop: 7 }, red: { color: '#E5484D' }, description: { color: '#667085', lineHeight: 20, marginBottom: 10 }, mint: { color: '#12A36D', fontWeight: '800' }, goalTrack: { backgroundColor: '#E4EBF5', height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 10 }, goalFill: { width: '62%', height: 8, borderRadius: 4, backgroundColor: '#12A36D' }, goalHeader: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 }, removeText: { color: '#E5484D', fontWeight: '800', paddingVertical: 2 }, switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12, paddingVertical: 8 }, compare: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', textAlign: 'center' }, compareValue: { color: '#2563EB', fontSize: 36, fontWeight: '800', textAlign: 'center', marginTop: 5 }, arrow: { color: '#667085', fontSize: 26 }, divider: { height: 1, backgroundColor: '#E6EDF9', marginVertical: 14 }, goodCard: { backgroundColor: '#F0FBF6', borderColor: '#BCECD6' }, goodText: { color: '#0E7C55', lineHeight: 21, fontWeight: '700' }, profileRow: { flexDirection: 'row', alignItems: 'center', gap: 13, marginVertical: 5 }, avatar: { width: 55, height: 55, borderRadius: 28, backgroundColor: '#2563EB', justifyContent: 'center', alignItems: 'center' }, avatarText: { color: '#FFFFFF', fontSize: 25 }, name: { fontSize: 21, color: '#102A43', fontWeight: '800' }, sectionLabel: { color: '#667085', fontSize: 12, fontWeight: '700' }, balanceCard: { backgroundColor: '#F5F9FF', borderColor: '#C7DBFC' }, balanceValue: { color: '#2563EB', fontSize: 31, fontWeight: '800', marginVertical: 5 }, dangerButton: { borderWidth: 1, borderColor: '#F1B5B8', backgroundColor: '#FFFFFF', borderRadius: 12, alignItems: 'center', paddingVertical: 14, marginTop: 8 }, dangerButtonText: { color: '#E5484D', fontSize: 16, fontWeight: '800' }, logout: { textAlign: 'center', color: '#E5484D', fontWeight: '800', padding: 18 }, nav: { flexDirection: 'row', height: 72, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#DCE8FA', paddingBottom: 6 }, navItem: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 3 }, navIcon: { color: '#7A879C', fontSize: 21 }, navLabel: { color: '#7A879C', fontSize: 11 }, navActive: { color: '#2563EB', fontWeight: '800' },
+  safe: { flex: 1, backgroundColor: '#F6F9FF' }, app: { flex: 1 }, splash: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 18 }, reelStage: { flexDirection: 'row', alignItems: 'center', gap: 16 }, reelFixed: { fontSize: 58, fontWeight: '800', color: '#1463E9' }, reelPill: { width: 116, height: 260, borderRadius: 31, overflow: 'hidden', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#B9D2FF', shadowColor: '#2563EB', shadowOpacity: 0.17, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 6 }, reelTrack: { position: 'absolute', top: 0, left: 0, right: 0 }, reelWord: { height: 52, color: '#2563EB', fontSize: 29, fontWeight: '800', textAlign: 'center', lineHeight: 52 }, reelFadeTop: { position: 'absolute', top: 0, left: 0, right: 0, height: 78, backgroundColor: 'rgba(246,249,255,0.78)' }, reelFadeBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 78, backgroundColor: 'rgba(246,249,255,0.78)' }, splashCopy: { fontSize: 19, color: '#102A43', fontWeight: '700', marginTop: 10 }, dots: { flexDirection: 'row', gap: 12, marginTop: 88 }, dot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#B8D1FF' }, dotActive: { backgroundColor: '#1463E9' }, login: { flex: 1, padding: 28, justifyContent: 'center', gap: 12 }, back: { fontSize: 42, color: '#102A43', marginBottom: 14 }, loginTitle: { fontSize: 31, fontWeight: '800', color: '#102A43', lineHeight: 41, marginBottom: 20 }, input: { borderWidth: 1, borderColor: '#C9DCF9', backgroundColor: '#FFFFFF', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, fontSize: 16, color: '#102A43' }, formGap: { marginTop: 10 }, labelWrap: { marginBottom: 12 }, label: { color: '#102A43', fontWeight: '700', marginBottom: 7 }, primary: { backgroundColor: '#2563EB', borderRadius: 12, alignItems: 'center', paddingVertical: 15, marginTop: 4 }, primaryText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' }, secondary: { borderWidth: 1, borderColor: '#B9D2FF', backgroundColor: '#FFFFFF', borderRadius: 12, alignItems: 'center', paddingVertical: 13, marginTop: 8 }, secondaryText: { color: '#102A43', fontSize: 16, fontWeight: '700' }, or: { textAlign: 'center', color: '#667085', marginTop: 8 }, signUp: { textAlign: 'center', color: '#667085', marginTop: 20 }, link: { color: '#2563EB', fontWeight: '800' }, scroll: { padding: 20, paddingBottom: 24, gap: 12 }, header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }, brand: { color: '#2563EB', fontSize: 19, fontWeight: '800', marginBottom: 7 }, title: { color: '#102A43', fontSize: 29, fontWeight: '800', letterSpacing: -1 }, headerAction: { borderWidth: 1, borderColor: '#2563EB', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9 }, headerActionText: { color: '#2563EB', fontWeight: '800' }, card: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE8FA', borderRadius: 18, padding: 15 }, cardTitle: { fontSize: 16, color: '#102A43', fontWeight: '800', marginBottom: 10 }, repeat: { fontSize: 20, fontWeight: '800', color: '#102A43', marginBottom: 10 }, barRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 7 }, barLabel: { width: 61, color: '#667085', fontSize: 12 }, barTrack: { flex: 1, height: 6, borderRadius: 4, backgroundColor: '#E6EDF9', overflow: 'hidden' }, barFill: { height: 6, borderRadius: 4, backgroundColor: '#2563EB' }, barAmount: { width: 58, textAlign: 'right', color: '#667085', fontSize: 11 }, analysis: { marginTop: 12, color: '#E5484D', fontWeight: '700', fontSize: 13 }, categoryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 12 }, category: { borderWidth: 1, borderColor: '#D8E5FA', borderRadius: 18, paddingHorizontal: 9, paddingVertical: 7 }, categorySelected: { backgroundColor: '#EAF2FF', borderColor: '#2563EB' }, categoryText: { color: '#667085', fontSize: 12 }, categoryTextSelected: { color: '#2563EB', fontWeight: '800' }, listRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' }, listIcon: { color: '#2563EB', width: 28, fontSize: 17 }, listText: { flex: 1, color: '#102A43', fontWeight: '700' }, listPlus: { color: '#2563EB', fontWeight: '700' }, statusCard: { minHeight: 120 }, statusLine: { color: '#102A43', fontWeight: '700' }, dDay: { fontSize: 45, fontWeight: '800', marginTop: 5 }, tag: { position: 'absolute', right: 15, top: 15, borderRadius: 10, paddingHorizontal: 9, paddingVertical: 5 }, tagText: { fontWeight: '800' }, metricWrap: { flexDirection: 'row', gap: 8 }, metric: { flex: 1, padding: 12, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE8FA', borderRadius: 14, alignItems: 'center' }, metricValue: { fontWeight: '800', color: '#102A43', fontSize: 17, marginTop: 7 }, red: { color: '#E5484D' }, description: { color: '#667085', lineHeight: 20, marginBottom: 10 }, mint: { color: '#12A36D', fontWeight: '800' }, goalTrack: { backgroundColor: '#E4EBF5', height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 10 }, goalFill: { width: '62%', height: 8, borderRadius: 4, backgroundColor: '#12A36D' }, goalHeader: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 }, removeText: { color: '#E5484D', fontWeight: '800', paddingVertical: 2 }, switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12, paddingVertical: 8 }, compare: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', textAlign: 'center' }, compareValue: { color: '#2563EB', fontSize: 36, fontWeight: '800', textAlign: 'center', marginTop: 5 }, arrow: { color: '#667085', fontSize: 26 }, divider: { height: 1, backgroundColor: '#E6EDF9', marginVertical: 14 }, goodCard: { backgroundColor: '#F0FBF6', borderColor: '#BCECD6' }, goodText: { color: '#0E7C55', lineHeight: 21, fontWeight: '700' }, profileRow: { flexDirection: 'row', alignItems: 'center', gap: 13, marginVertical: 5 }, avatar: { width: 55, height: 55, borderRadius: 28, backgroundColor: '#2563EB', justifyContent: 'center', alignItems: 'center' }, avatarText: { color: '#FFFFFF', fontSize: 25 }, name: { fontSize: 21, color: '#102A43', fontWeight: '800' }, sectionLabel: { color: '#667085', fontSize: 12, fontWeight: '700' }, balanceCard: { backgroundColor: '#F5F9FF', borderColor: '#C7DBFC' }, balanceValue: { color: '#2563EB', fontSize: 31, fontWeight: '800', marginVertical: 5 }, dangerButton: { borderWidth: 1, borderColor: '#F1B5B8', backgroundColor: '#FFFFFF', borderRadius: 12, alignItems: 'center', paddingVertical: 14, marginTop: 8 }, dangerButtonText: { color: '#E5484D', fontSize: 16, fontWeight: '800' }, logout: { textAlign: 'center', color: '#E5484D', fontWeight: '800', padding: 18 }, nav: { flexDirection: 'row', height: 72, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#DCE8FA', paddingBottom: 6 }, navItem: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 3 }, navIcon: { color: '#7A879C', fontSize: 21 }, navLabel: { color: '#7A879C', fontSize: 11 }, navActive: { color: '#2563EB', fontWeight: '800' },
   authHint: { color: '#667085', textAlign: 'center', lineHeight: 19, marginTop: 6 }, syncScreen: { flex: 1, padding: 28, alignItems: 'center', justifyContent: 'center' }, syncTitle: { color: '#102A43', fontSize: 24, fontWeight: '800', marginBottom: 10 },
   cashFlowRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingLeft: 28, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' }, cashFlowIcon: { width: 25, color: '#12A36D', fontSize: 17, fontWeight: '800' }, cashFlowCopy: { flex: 1 }, cashFlowTitle: { color: '#102A43', fontWeight: '700' }, cashFlowDate: { color: '#7A879C', fontSize: 11, marginTop: 2 }, cashFlowAmount: { color: '#12A36D', fontWeight: '800', fontSize: 13 },
-  goalSummary: { paddingVertical: 10, paddingLeft: 28, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' },
-  calendarHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }, calendarTitle: { color: '#102A43', fontWeight: '800', fontSize: 18 }, calendarMove: { color: '#2563EB', fontSize: 28, fontWeight: '800', paddingHorizontal: 9 }, calendarGrid: { flexDirection: 'row', flexWrap: 'wrap' }, calendarWeekCell: { width: '14.2857%', alignItems: 'center', paddingBottom: 6 }, calendarWeek: { color: '#7A879C', fontSize: 11, fontWeight: '700' }, calendarCell: { width: '14.2857%', minHeight: 54, padding: 3, borderTopWidth: 1, borderTopColor: '#ECF1FA' }, calendarToday: { backgroundColor: '#EAF2FF', borderRadius: 8 }, calendarDay: { color: '#52616F', fontSize: 11 }, calendarDayToday: { color: '#2563EB', fontWeight: '800' }, calendarIncome: { color: '#12A36D', fontSize: 9, fontWeight: '800', marginTop: 2 }, calendarExpense: { color: '#E5484D', fontSize: 9, fontWeight: '800', marginTop: 2 }, calendarLegend: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 8 }, formula: { color: '#102A43', fontWeight: '700', lineHeight: 22, marginBottom: 10 }, algorithmNumber: { color: '#2563EB', fontSize: 20, fontWeight: '800', marginBottom: 10 }, aiBasis: { color: '#7A879C', fontSize: 11, marginBottom: 12 }, goalBigNumber: { color: '#102A43', fontSize: 18, fontWeight: '800', marginBottom: 7 }, resultNumber: { color: '#102A43', fontSize: 18, fontWeight: '800', textAlign: 'center' }, goalDateNumber: { color: '#2563EB', fontSize: 18, fontWeight: '800', textAlign: 'center' },
+  goalSummary: { paddingVertical: 10, paddingLeft: 28, borderBottomWidth: 1, borderBottomColor: '#ECF1FA' }, goalSummaryHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, editText: { color: '#2563EB', fontWeight: '800', paddingHorizontal: 6, paddingVertical: 4 },
+  calendarHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }, calendarTitle: { color: '#102A43', fontWeight: '800', fontSize: 18 }, calendarMove: { color: '#2563EB', fontSize: 28, fontWeight: '800', paddingHorizontal: 9 }, calendarGrid: { flexDirection: 'row', flexWrap: 'wrap' }, calendarWeekCell: { width: '14.2857%', alignItems: 'center', paddingBottom: 6 }, calendarWeek: { color: '#7A879C', fontSize: 11, fontWeight: '700' }, calendarCell: { width: '14.2857%', minHeight: 54, padding: 3, borderTopWidth: 1, borderTopColor: '#ECF1FA' }, calendarToday: { backgroundColor: '#EAF2FF', borderRadius: 8 }, calendarDay: { color: '#52616F', fontSize: 11 }, calendarDayToday: { color: '#2563EB', fontWeight: '800' }, calendarIncome: { color: '#12A36D', fontSize: 9, fontWeight: '800', marginTop: 2 }, calendarExpense: { color: '#E5484D', fontSize: 9, fontWeight: '800', marginTop: 2 }, calendarLegend: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 8 }, dateSelector: { marginTop: 12, marginBottom: 12 }, dateSelectorRow: { flexDirection: 'row', gap: 7 }, dateStep: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderWidth: 1, borderColor: '#C9DCF9', backgroundColor: '#FFFFFF', borderRadius: 12, minHeight: 46, overflow: 'hidden' }, dateButton: { width: 30, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', backgroundColor: '#EEF5FF' }, dateButtonText: { color: '#2563EB', fontSize: 18, fontWeight: '800' }, dateValue: { color: '#102A43', fontSize: 13, fontWeight: '800' }, formula: { color: '#102A43', fontWeight: '700', lineHeight: 22, marginBottom: 10 }, algorithmNumber: { color: '#2563EB', fontSize: 20, fontWeight: '800', marginBottom: 10 }, aiBasis: { color: '#7A879C', fontSize: 11, marginBottom: 12 }, goalBigNumber: { color: '#102A43', fontSize: 18, fontWeight: '800', marginBottom: 7 }, resultNumber: { color: '#102A43', fontSize: 18, fontWeight: '800', textAlign: 'center' }, goalDateNumber: { color: '#2563EB', fontSize: 18, fontWeight: '800', textAlign: 'center' },
 });
