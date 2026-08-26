@@ -36,6 +36,10 @@ function isDays(value) {
   return Number.isInteger(value) && value >= 0 && value <= 36_500;
 }
 
+function isTimelinePoint(days, date) {
+  return (days === null && date === null) || (isDays(days) && isDate(date));
+}
+
 function parseBody(req) {
   if (isRecord(req.body)) return req.body;
   if (typeof req.body === 'string' && req.body.length <= MAX_BODY_BYTES) {
@@ -70,8 +74,10 @@ function validatePayload(input) {
   }
 
   if (!isRecord(input.reduction) || !CATEGORIES.has(input.reduction.category) || !isMoney(input.reduction.amount)) return null;
-  if (!isRecord(input.risk) || !isDays(input.risk.beforeDays) || !isDays(input.risk.afterDays) || input.risk.afterDays < input.risk.beforeDays || !isDate(input.risk.beforeDate) || !isDate(input.risk.afterDate)) return null;
-  if (!isRecord(input.goal) || !isDays(input.goal.beforeDays) || !isDays(input.goal.afterDays) || input.goal.afterDays > input.goal.beforeDays || !isDate(input.goal.beforeDate) || !isDate(input.goal.afterDate)) return null;
+  if (!isRecord(input.risk) || !isTimelinePoint(input.risk.beforeDays, input.risk.beforeDate) || !isTimelinePoint(input.risk.afterDays, input.risk.afterDate)) return null;
+  if (input.risk.beforeDays !== null && input.risk.afterDays !== null && input.risk.afterDays < input.risk.beforeDays) return null;
+  if (!isRecord(input.goal) || !isTimelinePoint(input.goal.beforeDays, input.goal.beforeDate) || !isTimelinePoint(input.goal.afterDays, input.goal.afterDate)) return null;
+  if (input.goal.beforeDays !== null && input.goal.afterDays !== null && input.goal.afterDays > input.goal.beforeDays) return null;
 
   return {
     totalExpense: input.totalExpense,
@@ -176,7 +182,7 @@ module.exports = async function handler(req, res) {
     '금액과 날짜를 다시 계산하거나 제공되지 않은 사실을 만들지 마라.',
     '투자, 대출, 수익 보장 등 금융 조언을 하지 마라.',
     '응답은 JSON 객체 하나로만 작성한다: {"category":"추천 카테고리","habit":"첫 문장","action":"둘째 문장","change":"셋째 문장"}.',
-    'category는 categoryTotals에 실제로 포함된 카테고리 중 먼저 줄이기 좋은 한 항목을 정확히 그대로 고른다.',
+    'category는 앱이 계산한 reduction.category와 정확히 같은 값으로 작성한다.',
     'habit은 가장 중요한 소비 습관, action은 구체적인 절약 행동, change는 앱 계산 위험 시점과 목표 달성일의 전후 변화를 설명한다.',
     '각 값은 한국어 한 문장이고 전체는 최대 180자다.',
   ].join(' ');
@@ -213,7 +219,7 @@ module.exports = async function handler(req, res) {
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content || '';
     const feedback = formatFeedback(content);
-    const category = recommendedCategory(content, payload.categoryTotals.map((item) => item.category));
+    const category = recommendedCategory(content, [payload.reduction.category]);
     if (!feedback || !category) {
       return reply(res, 502, { code: 'INVALID_AI_RESPONSE', message: 'AI 분석을 완료하지 못했어요' });
     }
